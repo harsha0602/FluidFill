@@ -1,4 +1,5 @@
-const isStaticExport = process.env.NEXT_OUTPUT === "export";
+const isStaticExport =
+  process.env.NEXT_OUTPUT === "export" || process.env.NEXT_PHASE === "phase-export";
 
 const repoName =
   process.env.NEXT_PUBLIC_REPO_NAME ??
@@ -17,7 +18,7 @@ const assetPrefix = basePath ? `${basePath}/` : undefined;
 /** @type {import("next").NextConfig} */
 const nextConfig = {
   reactStrictMode: true,
-  output: "standalone",
+  output: isStaticExport ? "export" : "standalone",
   trailingSlash: isStaticExport,
   images: {
     unoptimized: isStaticExport
