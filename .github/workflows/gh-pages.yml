@@ -25,22 +25,23 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 20
-          cache: npm
-      # If you use pnpm instead:
-      # - name: Setup pnpm
-      #   uses: pnpm/action-setup@v3
-      #   with:
-      #     version: 9
+          cache: pnpm
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v3
+        with:
+          version: 9
+      # If you use npm instead:
       # - name: Install deps
-      #   run: pnpm install --frozen-lockfile
+      #   run: npm ci
       # - name: Build static
-      #   run: pnpm run build:static
+      #   run: npm run build:static
 
       - name: Install deps
-        run: npm ci
+        run: pnpm install --frozen-lockfile
 
       - name: Build static
-        run: npm run build:static
+        run: pnpm run build:static
 
       - name: Setup Pages
         uses: actions/configure-pages@v5
