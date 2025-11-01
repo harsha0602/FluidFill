@@ -1,0 +1,20 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  @apply bg-background text-text font-sans antialiased flex min-h-screen flex-col;
+}
+
+#__next {
+  height: 100%;
+}
