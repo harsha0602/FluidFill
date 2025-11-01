@@ -1,0 +1,49 @@
+databases:
+  - name: fluidfill-db
+    plan: starter
+    databaseName: fluidfill
+    user: fluidfill
+
+services:
+  - type: web
+    name: fluidfill-api
+    env: node
+    rootDir: apps/api-gw
+    plan: starter
+    buildCommand: npm ci && npm run build
+    startCommand: node dist/index.js
+    healthCheckPath: /api/health
+    autoDeploy: true
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DATABASE_URL
+        fromDatabase:
+          name: fluidfill-db
+          property: connectionString
+      - key: DOC_SERVICE_URL
+        fromService:
+          type: web
+          name: fluidfill-docs
+          property: url
+      - key: FRONTEND_ORIGIN
+        value: https://<owner>.github.io/<repo>
+        sync: false
+      - key: PORT
+        value: "4000"
+
+  - type: web
+    name: fluidfill-docs
+    env: python
+    rootDir: apps/doc-service
+    plan: starter
+    buildCommand: pip install -e .
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: OPENAI_API_KEY
+        value: ""
+        sync: false
+      - key: PORT
+        value: "5001"

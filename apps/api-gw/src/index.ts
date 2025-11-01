@@ -38,7 +38,25 @@ const upload = multer({
   limits: { fileSize: 10 * 1024 * 1024 } // 10 MB
 });
 
-app.use(cors());
+const frontendOrigin = (process.env.FRONTEND_ORIGIN || "").replace(/\/$/, "");
+const allowedOrigins = new Set<string>(frontendOrigin ? [frontendOrigin] : []);
+
+app.use(
+  cors({
+    origin(origin, callback) {
+      if (!origin) {
+        return callback(null, true);
+      }
+      const normalized = origin.replace(/\/$/, "");
+      if (allowedOrigins.has(normalized)) {
+        return callback(null, true);
+      }
+      callback(new Error(`CORS blocked: ${origin}`));
+    },
+    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "Authorization"]
+  })
+);
 app.use(express.json({ limit: "2mb" }));
 
 app.get("/api/health", (_req, res) => {

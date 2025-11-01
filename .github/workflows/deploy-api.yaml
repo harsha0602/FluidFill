@@ -1,0 +1,47 @@
+name: Deploy Backend to Render
+
+on:
+  push:
+    branches: ["main"]
+
+jobs:
+  trigger-render-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 18
+
+      - name: Trigger Render blueprint deploy
+        env:
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+        run: |
+          if [ -z "${RENDER_API_KEY:-}" ]; then
+            echo "RENDER_API_KEY secret is not configured." >&2
+            exit 1
+          fi
+
+          REPO_URL="https://github.com/${GITHUB_REPOSITORY}"
+          REF_NAME="${GITHUB_REF_NAME:-main}"
+          REQUEST_BODY=$(printf '{"repo":"%s","ref":"%s"}' "$REPO_URL" "$REF_NAME")
+
+          RESPONSE_FILE="$(mktemp)"
+          HTTP_STATUS=$(curl -sS -o "$RESPONSE_FILE" -w "%{http_code}" \
+            -X POST "https://api.render.com/v1/blueprints" \
+            -H "Authorization: Bearer ${RENDER_API_KEY}" \
+            -H "Content-Type: application/json" \
+            -H "Accept: application/json" \
+            -d "$REQUEST_BODY")
+
+          echo "Render API response (status ${HTTP_STATUS}):"
+          cat "$RESPONSE_FILE"
+          echo
+
+          if [ "$HTTP_STATUS" -ge 400 ]; then
+            echo "Render deploy request failed." >&2
+            exit 1
+          fi

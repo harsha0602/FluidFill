@@ -29,7 +29,22 @@ const upload = multer({
     storage: multer.memoryStorage(),
     limits: { fileSize: 10 * 1024 * 1024 } // 10 MB
 });
-app.use(cors());
+const frontendOrigin = (process.env.FRONTEND_ORIGIN || "").replace(/\/$/, "");
+const allowedOrigins = new Set(frontendOrigin ? [frontendOrigin] : []);
+app.use(cors({
+    origin(origin, callback) {
+        if (!origin) {
+            return callback(null, true);
+        }
+        const normalized = origin.replace(/\/$/, "");
+        if (allowedOrigins.has(normalized)) {
+            return callback(null, true);
+        }
+        callback(new Error(`CORS blocked: ${origin}`));
+    },
+    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "Authorization"]
+}));
 app.use(express.json({ limit: "2mb" }));
 app.get("/api/health", (_req, res) => {
     res.json({ ok: true, service: "api-gw" });
@@ -46,7 +61,8 @@ async function ensureUploadsDir() {
 async function callDocServiceMultipart(endpoint, buffer, filename) {
     const url = `${docServiceBase}${endpoint.startsWith("/") ? endpoint : `/${endpoint}`}`;
     const form = new FormData();
-    form.append("file", new Blob([buffer]), filename);
+    const blobSource = buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength);
+    form.append("file", new Blob([blobSource]), filename);
     const resp = await fetch(url, {
         method: "POST",
         body: form
