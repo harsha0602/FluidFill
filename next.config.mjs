@@ -17,7 +17,7 @@ const assetPrefix = basePath ? `${basePath}/` : undefined;
 /** @type {import("next").NextConfig} */
 const nextConfig = {
   reactStrictMode: true,
-  output: isStaticExport ? "export" : "standalone",
+  output: "standalone",
   trailingSlash: isStaticExport,
   images: {
     unoptimized: isStaticExport
