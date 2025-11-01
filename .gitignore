@@ -2,3 +2,5 @@ node_modules
 /.next
 /out
 pnpm-debug.log*
+.venv/
+.venv-doc/

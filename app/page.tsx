@@ -1,14 +1,13 @@
 "use client";
 
-import { useCallback, useState } from "react";
+import { useCallback } from "react";
+
 import { LandingUpload } from "@/components/LandingUpload";
+import { uploadDocument } from "@/lib/client/uploadDocument";
 
 export default function Home() {
-  const [uploadedFileName, setUploadedFileName] = useState<string | null>(null);
-
-  const handleUpload = useCallback((file: File) => {
-    setUploadedFileName(file.name);
-    // Future integration point: trigger API upload or route transition.
+  const handleUpload = useCallback(async (file: File) => {
+    await uploadDocument(file);
   }, []);
 
   return (
@@ -23,12 +22,6 @@ export default function Home() {
       </div>
 
       <LandingUpload onUpload={handleUpload} />
-
-      {uploadedFileName && (
-        <p className="text-sm text-text/60">
-          Last uploaded: <span className="font-medium text-text">{uploadedFileName}</span>
-        </p>
-      )}
     </section>
   );
 }
