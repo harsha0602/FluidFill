@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { Suspense, useEffect, useMemo, useState } from "react";
+import { useSearchParams } from "next/navigation";
 
 type SchemaGroup = {
   name?: string;
@@ -23,8 +24,17 @@ const apiBase = process.env.NEXT_PUBLIC_API_BASE?.replace(/\/$/, "") ?? "";
 
 const buildUrl = (path: string) => (apiBase ? `${apiBase}${path}` : path);
 
-export default function DocumentPage({ params }: { params: { id: string } }) {
-  const { id } = params;
+export default function DocumentPage() {
+  return (
+    <Suspense fallback={<DocumentSkeleton />}>
+      <DocumentContent />
+    </Suspense>
+  );
+}
+
+function DocumentContent() {
+  const searchParams = useSearchParams();
+  const id = searchParams.get("id") ?? "";
 
   const [meta, setMeta] = useState<DocumentMeta | null>(null);
   const [previewHtml, setPreviewHtml] = useState<string | null>(null);
@@ -33,6 +43,15 @@ export default function DocumentPage({ params }: { params: { id: string } }) {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
+    if (!id) {
+      setMeta(null);
+      setPreviewHtml(null);
+      setSchemaGroups([]);
+      setLoading(false);
+      setError("No document ID provided.");
+      return;
+    }
+
     let cancelled = false;
 
     async function loadDocument() {
@@ -121,19 +140,19 @@ export default function DocumentPage({ params }: { params: { id: string } }) {
     }
   }, [meta?.createdAt]);
 
-  if (loading) {
+  if (!id) {
     return (
-      <section className="flex w-full flex-col gap-6">
-        <header className="space-y-2">
-          <div className="h-8 w-72 animate-pulse rounded bg-primary/40" />
-          <div className="h-4 w-48 animate-pulse rounded bg-primary/30" />
-        </header>
-        <div className="grid gap-6 lg:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
-          <div className="min-h-[60vh] animate-pulse rounded-xl border border-primary/20 bg-background/40" />
-          <div className="min-h-[60vh] animate-pulse rounded-xl border border-primary/20 bg-background/30" />
-        </div>
+      <section className="flex flex-col items-center gap-3 text-center">
+        <h1 className="text-2xl font-semibold text-text">Document unavailable</h1>
+        <p className="max-w-md text-sm text-text/70">
+          Try uploading the template again from the upload page.
+        </p>
       </section>
     );
+  }
+
+  if (loading) {
+    return <DocumentSkeleton />;
   }
 
   if (error) {
@@ -185,6 +204,21 @@ export default function DocumentPage({ params }: { params: { id: string } }) {
             to complete it right here shortly.
           </p>
         </aside>
+      </div>
+    </section>
+  );
+}
+
+function DocumentSkeleton() {
+  return (
+    <section className="flex w-full flex-col gap-6">
+      <header className="space-y-2">
+        <div className="h-8 w-72 animate-pulse rounded bg-primary/40" />
+        <div className="h-4 w-48 animate-pulse rounded bg-primary/30" />
+      </header>
+      <div className="grid gap-6 lg:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
+        <div className="min-h-[60vh] animate-pulse rounded-xl border border-primary/20 bg-background/40" />
+        <div className="min-h-[60vh] animate-pulse rounded-xl border border-primary/20 bg-background/30" />
       </div>
     </section>
   );

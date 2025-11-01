@@ -23,5 +23,5 @@ export async function uploadDocument(file: File) {
     throw new Error("Upload succeeded but no document ID was returned.");
   }
 
-  window.location.href = `/doc/${json.documentId}`;
+  return json.documentId;
 }

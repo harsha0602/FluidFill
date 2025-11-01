@@ -47,11 +47,6 @@ jobs:
           NEXT_OUTPUT: export
         run: pnpm run build:static
 
-      - name: Export static
-        env:
-          NEXT_OUTPUT: export
-        run: pnpm run export
-
       - name: Setup Pages
         uses: actions/configure-pages@v5
 

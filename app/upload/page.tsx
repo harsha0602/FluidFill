@@ -1,14 +1,21 @@
 "use client";
 
 import { useCallback } from "react";
+import { useRouter } from "next/navigation";
 
 import { LandingUpload } from "@/components/LandingUpload";
 import { uploadDocument } from "@/lib/client/uploadDocument";
 
 export default function UploadPage() {
-  const handleUpload = useCallback(async (file: File) => {
-    await uploadDocument(file);
-  }, []);
+  const router = useRouter();
+
+  const handleUpload = useCallback(
+    async (file: File) => {
+      const documentId = await uploadDocument(file);
+      router.push(`/doc?id=${encodeURIComponent(documentId)}`);
+    },
+    [router]
+  );
 
   return (
     <section className="flex flex-col items-center gap-6 text-center">
