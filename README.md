@@ -14,6 +14,17 @@ FluidFill is a Next.js 14 starter styled with a Lexsy-inspired palette. It ships
    ```
 3. Open <http://localhost:3000> to view the landing page.
 
+## Static Export
+
+- Build locally with `npm run build:static` (or `pnpm run build:static`) to generate the static `out/` folder.
+
+## GitHub Pages Deployment
+
+- Enable GitHub Pages under **Settings → Pages** and select **GitHub Actions** as the source.
+- Pushes to `main` trigger the `Deploy to GitHub Pages` workflow, which exports the site and deploys it to `https://<USER>.github.io/<REPO_NAME>/`.
+- Base path and assets automatically adjust in CI via `GITHUB_REPOSITORY`; local `npm run dev` continues to serve from `/`.
+- For a custom domain, add `public/CNAME` and configure the domain within Pages settings after the first successful deploy.
+
 ## Tech Stack
 
 - Next.js 14 (App Router, TypeScript)

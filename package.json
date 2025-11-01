@@ -5,13 +5,16 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
+    "build:static": "NEXT_OUTPUT=export next build",
+    "export": "NEXT_OUTPUT=export next export",
     "start": "next start",
     "lint": "next lint"
   },
   "dependencies": {
     "next": "14.2.7",
     "react": "18.3.1",
-    "react-dom": "18.3.1"
+    "react-dom": "18.3.1",
+    "react-dropzone": "^14.2.3"
   },
   "devDependencies": {
     "@types/node": "^20.12.12",
