@@ -2,6 +2,9 @@
   "name": "fluidfill-api-gw",
   "private": true,
   "version": "0.1.0",
+  "engines": {
+    "node": ">=18 <21"
+  },
   "type": "module",
   "scripts": {
     "dev": "tsx watch src/index.ts",

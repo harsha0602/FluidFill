@@ -34,6 +34,10 @@ FluidFill is a Next.js 14 starter styled with a Lexsy-inspired palette. It ships
 5. Define a repository variable `NEXT_PUBLIC_API_BASE` that points to the public API URL (for example `https://fluidfill-api.onrender.com`). The GitHub Pages workflow injects this at build time.
 6. For local work, copy `.env.example` to `.env` and set `FRONTEND_ORIGIN=http://localhost:3000` so the API gateway accepts requests from the Next.js dev server.
 
+### Render Build Notes
+
+When building `fluidfill-api` on Render, set `NPM_CONFIG_PRODUCTION=false` so the install step includes devDependencies such as `@types/*`. Skipping them causes the TypeScript compiler to miss Node module type definitions and fail the build.
+
 ## Tech Stack
 
 - Next.js 14 (App Router, TypeScript)
