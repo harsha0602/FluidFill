@@ -27,6 +27,26 @@ async function dbQuery<T extends pg.QueryResultRow = pg.QueryResultRow>(
   return pool.query<T>(text, params);
 }
 
+async function applyMigrations() {
+  const migrationsDir = path.resolve(process.cwd(), "../../db/migrations");
+  try {
+    const entries = await fsp.readdir(migrationsDir);
+    const migrations = entries
+      .filter((file) => file.toLowerCase().endsWith(".sql"))
+      .sort();
+
+    for (const file of migrations) {
+      const filePath = path.join(migrationsDir, file);
+      const sql = await fsp.readFile(filePath, "utf8");
+      console.log(`Applying migration: ${file}`);
+      await pool.query(sql);
+    }
+  } catch (error) {
+    console.error("Migration failed:", error);
+    throw error;
+  }
+}
+
 const app = express();
 const port = Number(process.env.PORT) || 4000;
 const docServiceBase =
@@ -134,7 +154,7 @@ app.post("/api/upload", upload.single("file"), async (req, res) => {
 
   try {
     await ensureUploadsDir();
-    await fsp.writeFile(filePath, file.buffer);
+    await fsp.writeFile(filePath, file.buffer as NodeJS.ArrayBufferView);
   } catch (error) {
     console.error("Failed to persist upload:", error);
     return res.status(500).json({ error: "Failed to store uploaded file" });
@@ -411,6 +431,13 @@ app.post("/api/doc/:id/answer", async (req, res) => {
   res.json({ ok: true, key, value });
 });
 
-app.listen(port, () => {
-  console.log(`api-gw listening on :${port}`);
+async function startServer() {
+  await applyMigrations();
+  app.listen(port, () => {
+    console.log(`api-gw listening on :${port}`);
+  });
+}
+
+startServer().catch((err) => {
+  console.error("Failed to start server:", err);
 });

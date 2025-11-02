@@ -21,6 +21,25 @@ const pool = new Pool({
 async function dbQuery(text, params) {
     return pool.query(text, params);
 }
+async function applyMigrations() {
+    const migrationsDir = path.resolve(process.cwd(), "../../db/migrations");
+    try {
+        const entries = await fsp.readdir(migrationsDir);
+        const migrations = entries
+            .filter((file) => file.toLowerCase().endsWith(".sql"))
+            .sort();
+        for (const file of migrations) {
+            const filePath = path.join(migrationsDir, file);
+            const sql = await fsp.readFile(filePath, "utf8");
+            console.log(`Applying migration: ${file}`);
+            await pool.query(sql);
+        }
+    }
+    catch (error) {
+        console.error("Migration failed:", error);
+        throw error;
+    }
+}
 const app = express();
 const port = Number(process.env.PORT) || 4000;
 const docServiceBase = (process.env.DOC_SERVICE_URL || "http://localhost:5001").replace(/\/$/, "");
@@ -288,6 +307,12 @@ app.post("/api/doc/:id/answer", async (req, res) => {
     }
     res.json({ ok: true, key, value });
 });
-app.listen(port, () => {
-    console.log(`api-gw listening on :${port}`);
+async function startServer() {
+    await applyMigrations();
+    app.listen(port, () => {
+        console.log(`api-gw listening on :${port}`);
+    });
+}
+startServer().catch((err) => {
+    console.error("Failed to start server:", err);
 });
