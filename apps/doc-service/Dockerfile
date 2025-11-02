@@ -10,6 +10,12 @@ RUN apt-get update \
   && apt-get install --no-install-recommends -y build-essential curl \
   && rm -rf /var/lib/apt/lists/*
 
+ENV RUSTUP_HOME=/usr/local/rustup
+ENV CARGO_HOME=/usr/local/cargo
+RUN mkdir -p "$RUSTUP_HOME" "$CARGO_HOME"
+ENV PATH=$CARGO_HOME/bin:$PATH
+RUN curl https://sh.rustup.rs -sSf | sh -s -- -y
+
 COPY pyproject.toml ./
 COPY app ./app
 
