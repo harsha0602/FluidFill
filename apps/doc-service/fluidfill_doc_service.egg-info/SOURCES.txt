@@ -1,7 +1,10 @@
+README.md
 pyproject.toml
+app/ai_studio.py
 app/main.py
 fluidfill_doc_service.egg-info/PKG-INFO
 fluidfill_doc_service.egg-info/SOURCES.txt
 fluidfill_doc_service.egg-info/dependency_links.txt
 fluidfill_doc_service.egg-info/requires.txt
 fluidfill_doc_service.egg-info/top_level.txt
+tests/test_schema.py

@@ -289,6 +289,51 @@ app.get("/api/doc/:id", async (req, res) => {
   }
 });
 
+app.delete("/api/doc/:id", async (req, res) => {
+  const { id } = req.params;
+  const client = await pool.connect();
+
+  try {
+    await client.query("BEGIN");
+
+    const docResult = await client.query<{ storage_url: string | null }>(
+      `SELECT storage_url
+         FROM documents
+         WHERE id = $1
+         FOR UPDATE`,
+      [id]
+    );
+
+    const doc = docResult.rows[0];
+
+    if (!doc) {
+      await client.query("ROLLBACK");
+      return res.json({ ok: true, deleted: false });
+    }
+
+    await client.query(`DELETE FROM documents WHERE id = $1`, [id]);
+    await client.query("COMMIT");
+
+    if (doc.storage_url) {
+      try {
+        await fsp.unlink(doc.storage_url);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException)?.code !== "ENOENT") {
+          console.error("Failed to remove stored document:", error);
+        }
+      }
+    }
+
+    res.json({ ok: true });
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => {});
+    console.error("Failed to delete document:", error);
+    res.status(500).json({ error: "Failed to delete document" });
+  } finally {
+    client.release();
+  }
+});
+
 app.get("/api/doc/:id/preview", async (req, res) => {
   const { id } = req.params;
 

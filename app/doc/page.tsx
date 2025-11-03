@@ -1,7 +1,7 @@
 "use client";
 
-import { Suspense, useEffect, useMemo, useState } from "react";
-import { useSearchParams } from "next/navigation";
+import { Suspense, useEffect, useMemo, useRef, useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 
 type SchemaGroup = {
   name?: string;
@@ -35,6 +35,7 @@ export default function DocumentPage() {
 function DocumentContent() {
   const searchParams = useSearchParams();
   const id = searchParams.get("id") ?? "";
+  const router = useRouter();
 
   const [meta, setMeta] = useState<DocumentMeta | null>(null);
   const [previewHtml, setPreviewHtml] = useState<string | null>(null);
@@ -42,7 +43,119 @@ function DocumentContent() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
+  const [canLoadDoc, setCanLoadDoc] = useState(false);
+  const lastProcessedIdRef = useRef<string | null>(null);
+  const shouldDiscardRef = useRef(false);
+
   useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    const storageKey = "fluidfill:last-doc-id";
+
+    if (!id) {
+      try {
+        sessionStorage.removeItem(storageKey);
+      } catch {
+        // Ignore storage errors
+      }
+      setCanLoadDoc(false);
+      shouldDiscardRef.current = false;
+      lastProcessedIdRef.current = null;
+      return;
+    }
+
+    if (lastProcessedIdRef.current === id) {
+      return;
+    }
+
+    lastProcessedIdRef.current = id;
+
+    const determineNavigationType = () => {
+      if (typeof performance === "undefined") {
+        return undefined;
+      }
+      const navEntries = performance.getEntriesByType(
+        "navigation"
+      ) as PerformanceNavigationTiming[];
+      const latestEntry = navEntries[navEntries.length - 1];
+      if (latestEntry?.type) {
+        return latestEntry.type;
+      }
+      const legacyNav = (performance as any)?.navigation;
+      if (legacyNav?.type === 1) return "reload";
+      if (legacyNav?.type === 0) return "navigate";
+      if (legacyNav?.type === 2) return "back_forward";
+      return undefined;
+    };
+
+    const navType = determineNavigationType();
+
+    let lastDocId: string | null = null;
+    try {
+      lastDocId = sessionStorage.getItem(storageKey);
+    } catch {
+      lastDocId = null;
+    }
+
+    if (navType === "reload" && lastDocId === id) {
+      shouldDiscardRef.current = true;
+      setCanLoadDoc(false);
+      try {
+        sessionStorage.removeItem(storageKey);
+      } catch {
+        // Ignore storage errors
+      }
+      return;
+    }
+
+    try {
+      sessionStorage.setItem(storageKey, id);
+    } catch {
+      // Ignore storage errors
+    }
+    shouldDiscardRef.current = false;
+    setCanLoadDoc(true);
+  }, [id]);
+
+  useEffect(() => {
+    if (!shouldDiscardRef.current || !id) {
+      return;
+    }
+
+    let cancelled = false;
+
+    router.replace("/upload");
+
+    async function discardDocument() {
+      try {
+        await fetch(buildUrl(`/api/doc/${id}`), {
+          method: "DELETE"
+        });
+      } catch (deleteError) {
+        console.error("Failed to delete document after reload:", deleteError);
+      } finally {
+        if (!cancelled) {
+          router.replace("/upload");
+        }
+        shouldDiscardRef.current = false;
+      }
+    }
+
+    discardDocument();
+
+    return () => {
+      cancelled = true;
+      shouldDiscardRef.current = false;
+    };
+  }, [id, router]);
+
+  useEffect(() => {
+    if (!canLoadDoc) {
+      return;
+    }
+
     if (!id) {
       setMeta(null);
       setPreviewHtml(null);
@@ -63,10 +176,7 @@ function DocumentContent() {
         if (cancelled) return;
 
         if (metaResp.status === 404) {
-          setError("Document not found.");
-          setMeta(null);
-          setPreviewHtml(null);
-          setSchemaGroups([]);
+          router.replace("/upload");
           return;
         }
 
@@ -126,7 +236,7 @@ function DocumentContent() {
     return () => {
       cancelled = true;
     };
-  }, [id]);
+  }, [id, canLoadDoc, router]);
 
   const uploadedTimestamp = useMemo(() => {
     if (!meta?.createdAt) return null;
