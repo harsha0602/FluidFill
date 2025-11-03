@@ -17,10 +17,11 @@ from docx.oxml.text.paragraph import CT_P
 from docx.table import Table
 from docx.text.paragraph import Paragraph
 from fastapi import FastAPI, File, HTTPException, UploadFile
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.ai_studio import call_gemini_json
-from app.models import SchemaResponse
+from app.models import FieldSchema, SchemaGroup, SchemaResponse
+from app.render_docx import render_docx_from_b64
 
 load_dotenv()
 
@@ -55,6 +56,8 @@ class ParsedPlaceholder(BaseModel):
     key: str
     label: str
     occurrences: int
+    example_context: Optional[str] = None
+    tokens: List[str] = Field(default_factory=list)
 
 
 class ParseResult(BaseModel):
@@ -67,9 +70,42 @@ class Placeholder(BaseModel):
     label: str
     occurrences: int
     example_context: Optional[str] = None
+    tokens: List[str] = Field(default_factory=list)
 
 
 PLACEHOLDER_PATTERN = re.compile(r"\[([^\]]+)\]|(_{3,})")
+STOPWORDS = {
+    "the",
+    "a",
+    "an",
+    "of",
+    "and",
+    "or",
+    "to",
+    "for",
+    "on",
+    "in",
+    "by",
+    "at",
+    "as",
+    "with",
+    "from",
+    "this",
+    "that",
+    "these",
+    "those",
+    "is",
+    "are",
+    "be",
+    "will",
+    "shall",
+    "may",
+    "must",
+    "can",
+    "about",
+    "see",
+    "section",
+}
 
 HTML_STYLES = """
 <style>
@@ -205,6 +241,119 @@ def _iter_all_paragraphs(parent: Any) -> Iterable[Paragraph]:
                     yield from _iter_all_paragraphs(cell)
 
 
+def _build_context_snippet(text: str, start: int, end: int, window: int = 80) -> str:
+    prefix = text[max(0, start - window):start]
+    suffix = text[end:min(len(text), end + window)]
+    middle = text[start:end]
+    snippet = f"{prefix}[{middle}]{suffix}"
+    snippet = re.sub(r"\s+", " ", snippet).strip()
+    return snippet[:400]
+
+
+def _collect_tokens(segment: str) -> List[str]:
+    return re.findall(r"[A-Za-z0-9]+", segment.replace("_", " "))
+
+
+def _significant(tokens: Iterable[str]) -> List[str]:
+    significant: List[str] = []
+    for token in tokens:
+        lowered = token.lower()
+        if lowered in STOPWORDS:
+            continue
+        significant.append(token)
+    return significant
+
+
+def _slug_from_context(text: str, start: int, end: int) -> str:
+    before = text[max(0, start - 120):start]
+    after = text[end:min(len(text), end + 120)]
+
+    before_tokens = _collect_tokens(before)
+    after_tokens = _collect_tokens(after)
+
+    before_sig = _significant(before_tokens)
+    after_sig = _significant(after_tokens)
+
+    colon_near = ":" in text[max(0, start - 5):start]
+
+    suffix_char = ""
+    for ch in text[end:]:
+        if not ch.isspace():
+            suffix_char = ch
+            break
+    prefer_before = suffix_char in {".", ",", ";", ":", ")", "]"}
+
+    def has_alpha(token: str) -> bool:
+        return any(ch.isalpha() for ch in token)
+
+    after_meaningful = (
+        [token for token in after_sig if has_alpha(token)] if not prefer_before else []
+    )
+
+    parts: List[str] = []
+
+    if colon_near and before_sig:
+        parts.append(before_sig[-1])
+
+    if after_meaningful:
+        parts.extend(after_meaningful[:2])
+    elif not prefer_before and after_sig:
+        parts.extend(after_sig[:1])
+    elif not prefer_before and after_tokens:
+        parts.extend(after_tokens[:1])
+
+    if len(parts) < 2:
+        needed = 2 - len(parts)
+        if before_sig:
+            prefix = before_sig[-needed:]
+            parts = prefix + parts
+        elif before_tokens:
+            parts = before_tokens[-needed:] + parts
+
+    if not parts and before_sig:
+        parts = before_sig[-3:]
+    if not parts and after_meaningful:
+        parts = after_meaningful[:2]
+    if not parts and not prefer_before and after_sig:
+        parts = after_sig[:1]
+    if not parts and before_tokens:
+        parts = before_tokens[-3:]
+    if not parts and not prefer_before and after_tokens:
+        parts = after_tokens[:1]
+
+    seen: set[str] = set()
+    ordered_parts: List[str] = []
+    for token in parts:
+        if token not in seen:
+            ordered_parts.append(token)
+            seen.add(token)
+
+    alpha_parts = [token for token in ordered_parts if has_alpha(token)]
+    if not alpha_parts:
+        for token in reversed(before_sig):
+            if has_alpha(token) and token not in alpha_parts:
+                alpha_parts.insert(0, token)
+                if len(alpha_parts) >= 3:
+                    break
+    if alpha_parts:
+        ordered_parts = alpha_parts
+
+    phrase = " ".join(ordered_parts).strip()
+    slug = _to_snake_case(phrase)
+    if slug:
+        return slug
+
+    if not prefer_before and after_tokens:
+        slug = _to_snake_case(after_tokens[0])
+        if slug:
+            return slug
+    if before_tokens:
+        slug = _to_snake_case(before_tokens[-1])
+        if slug:
+            return slug
+    return ""
+
+
 def extract_placeholders(document: DocumentType) -> List[ParsedPlaceholder]:
     placeholders: OrderedDict[str, Dict[str, Any]] = OrderedDict()
 
@@ -216,27 +365,115 @@ def extract_placeholders(document: DocumentType) -> List[ParsedPlaceholder]:
             continue
 
         for match in PLACEHOLDER_PATTERN.finditer(text):
+            start, end = match.span()
             raw_label = match.group(1)
+
+            key: Optional[str] = None
+            label: Optional[str] = None
+            treat_as_blank = False
+
             if raw_label is not None:
-                label = " ".join(raw_label.split())
-                if not label:
-                    continue
-                key = _to_snake_case(label)
-                if not key:
-                    continue
+                candidate_label = " ".join(raw_label.split())
+                if candidate_label and not re.fullmatch(r"_+", candidate_label):
+                    candidate_key = _to_snake_case(candidate_label)
+                    if candidate_key:
+                        label = candidate_label
+                        key = candidate_key
+                    else:
+                        treat_as_blank = True
+                else:
+                    treat_as_blank = True
             else:
-                label = "Blank"
-                key = "blank"
+                treat_as_blank = True
+
+            if treat_as_blank:
+                key_candidate = _slug_from_context(text, start, end)
+                if key_candidate:
+                    key = key_candidate
+                    label = key_candidate.replace("_", " ").title()
+                else:
+                    key = f"blank_{len(placeholders) + 1}"
+                    label = "Blank"
+
+            assert key is not None and label is not None
 
             placeholder_entry = placeholders.setdefault(
-                key, {"label": label, "occurrences": 0}
+                key,
+                {"label": label, "occurrences": 0, "contexts": [], "tokens": []},
             )
             placeholder_entry["occurrences"] += 1
+            placeholder_text = match.group(0)
+            if placeholder_text and placeholder_text not in placeholder_entry["tokens"]:
+                placeholder_entry["tokens"].append(placeholder_text)
+            underscore_group = match.group(2)
+            if underscore_group and underscore_group not in placeholder_entry["tokens"]:
+                placeholder_entry["tokens"].append(underscore_group)
+            snippet = _build_context_snippet(text, start, end)
+            if snippet and len(placeholder_entry["contexts"]) < 5:
+                placeholder_entry["contexts"].append(snippet)
 
-    return [
-        ParsedPlaceholder(key=key, label=data["label"], occurrences=data["occurrences"])
-        for key, data in placeholders.items()
-    ]
+    result: List[ParsedPlaceholder] = []
+    for key, data in placeholders.items():
+        example_context = data["contexts"][0] if data.get("contexts") else None
+        result.append(
+            ParsedPlaceholder(
+                key=key,
+                label=data["label"],
+                occurrences=data["occurrences"],
+                example_context=example_context,
+                tokens=list(dict.fromkeys(data.get("tokens") or [])),
+            )
+        )
+    return result
+
+
+def build_fallback_schema(placeholders: List[Placeholder]) -> SchemaResponse:
+    seen: set[str] = set()
+    fields: List[FieldSchema] = []
+
+    for placeholder in placeholders:
+        if placeholder.key in seen:
+            continue
+        seen.add(placeholder.key)
+
+        label = placeholder.label or placeholder.key.replace("_", " ").title()
+        targets: List[str] = []
+
+        for token in placeholder.tokens:
+            clean = token.strip()
+            if clean:
+                targets.append(clean)
+
+        if not targets and label:
+            targets.append(f"[{label}]")
+
+        if not targets:
+            fallback_display = placeholder.key.replace("_", " ").title()
+            if fallback_display:
+                targets.append(f"[{fallback_display}]")
+
+        unique_targets = list(dict.fromkeys(targets))
+
+        fields.append(
+            FieldSchema(
+                key=placeholder.key,
+                label=label,
+                type="text",
+                required=True,
+                help=placeholder.example_context,
+                targets=unique_targets,
+            )
+        )
+
+    if not fields:
+        return SchemaResponse()
+
+    group = SchemaGroup(
+        id="document_fields",
+        title="Document Fields",
+        fields=fields,
+    )
+    return SchemaResponse(groups=[group])
 
 
 def render_docx_to_html(file: UploadFile) -> str:
@@ -392,6 +629,11 @@ async def schema_endpoint(payload: Dict[str, Any]):
                 label=label,
                 occurrences=occurrences,
                 example_context=item.get("example_context"),
+                tokens=[
+                    str(token).strip()
+                    for token in item.get("tokens", []) or []
+                    if isinstance(token, str) and token.strip()
+                ],
             )
         )
 
@@ -409,7 +651,11 @@ async def schema_endpoint(payload: Dict[str, Any]):
         schema = SchemaResponse.model_validate(schema_payload)
     except Exception as exc:  # pragma: no cover - defensive logging
         logger.error("Invalid schema JSON: %s ...raw=%s", exc, raw[:600])
-        raise HTTPException(status_code=502, detail="schema_generation_failed") from exc
+        schema = build_fallback_schema(placeholders)
+        logger.info(
+            "Falling back to deterministic schema with %d fields", sum(len(g.fields) for g in schema.groups)
+        )
+        return schema.model_dump()
 
     logger.info("Received schema with %d groups from Google AI Studio", len(schema.groups))
     return schema.model_dump()
@@ -422,3 +668,34 @@ def ai_studio_ping():
     prompt = 'Return JSON: {"ok": true}'
     raw = call_gemini_json(prompt, AI_STUDIO_MODEL)
     return {"raw": raw[:2000]}
+
+
+from fastapi import HTTPException
+from pydantic import BaseModel
+import base64, logging
+from app.render_docx import render_docx_from_b64
+
+logger = logging.getLogger(__name__)
+
+class RenderRequest(BaseModel):
+    doc_bytes_b64: str
+    mapping: dict[str, str]
+    filename: str | None = None
+
+@app.post("/render")
+def render_endpoint(req: RenderRequest):
+    try:
+        filled_b64, replaced_count, out_name = render_docx_from_b64(
+            req.doc_bytes_b64, req.mapping, suggested_name=req.filename
+        )
+        return {
+            "filled_bytes_b64": filled_b64,
+            "filled_filename": out_name,
+            "replaced_count": replaced_count
+        }
+    except ValueError as ve:
+        logger.warning("render validation error: %s", ve)
+        raise HTTPException(status_code=422, detail=str(ve))
+    except Exception as e:
+        logger.exception("render failed: %s", e)
+        raise HTTPException(status_code=502, detail="render_failed")

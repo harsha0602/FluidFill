@@ -75,6 +75,7 @@ function DocumentContent() {
   const [touchedFields, setTouchedFields] = useState<Record<string, boolean>>({});
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [downloading, setDownloading] = useState(false);
 
   const schemaGroups = useMemo(() => schema?.groups ?? [], [schema]);
 
@@ -507,7 +508,7 @@ function DocumentContent() {
         )}
       </header>
 
-      <div className="grid gap-6 lg:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
+      <div className="grid gap-6 items-start lg:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
         <div className="min-h-[60vh] rounded-xl border border-primary/40 bg-background/60 p-4 shadow-inner shadow-primary/10">
           <article
             className="prose prose-invert max-w-none overflow-y-auto text-sm leading-relaxed [&>div]:space-y-4"
@@ -515,7 +516,7 @@ function DocumentContent() {
           />
         </div>
 
-        <aside className="flex min-h-[60vh] flex-col gap-4 rounded-xl border border-primary/40 bg-background/40 p-4 shadow">
+        <aside className="flex flex-col gap-4 self-start rounded-xl border border-primary/40 bg-background/40 p-4 shadow">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div>
               <h2 className="text-xl font-semibold text-text">Fill the form</h2>
@@ -563,7 +564,7 @@ function DocumentContent() {
             </div>
           ) : (
             <form
-              className="flex-1 space-y-6 overflow-y-auto"
+              className="space-y-6 max-h-[70vh] overflow-y-auto"
               onSubmit={(event: FormEvent<HTMLFormElement>) => event.preventDefault()}
             >
               {schemaGroups.map((group, groupIndex) => (
@@ -748,6 +749,35 @@ function DocumentContent() {
               ))}
             </form>
           )}
+          <button
+            className="rounded-2xl px-4 py-2 bg-[#9d76dd] text-white shadow hover:opacity-90"
+            onClick={async () => {
+              try {
+                setDownloading(true);
+                const res = await fetch(
+                  `${process.env.NEXT_PUBLIC_API_BASE}/api/doc/${id}/render`,
+                  { method: "POST" }
+                );
+                if (!res.ok) {
+                  const err = await res.json().catch(() => ({}));
+                  throw new Error(err?.error || "Download failed");
+                }
+                const blob = await res.blob();
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement("a");
+                a.href = url;
+                a.download = `${meta?.filename || "document"}_filled.docx`;
+                a.click();
+                URL.revokeObjectURL(url);
+              } catch (e) {
+                console.error("Download error:", e);
+              } finally {
+                setDownloading(false);
+              }
+            }}
+          >
+            {downloading ? "Preparing…" : "Download filled .docx"}
+          </button>
         </aside>
       </div>
     </section>

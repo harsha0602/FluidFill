@@ -128,6 +128,8 @@ type ParsePlaceholder = {
   key: string;
   label: string;
   occurrences?: number;
+  example_context?: string | null;
+  tokens?: string[];
 };
 
 type ParseResult = {
@@ -139,7 +141,16 @@ type SchemaRow = {
   id: string;
   doc_id: string;
   model_name: string | null;
-  body: unknown;
+  body: {
+    groups?: Array<{
+      id: string;
+      fields?: Array<{
+        key: string;
+        label?: string;
+        targets?: string[];
+      }>;
+    }>;
+  };
   created_at: string;
 };
 
@@ -147,12 +158,55 @@ type AnswerRow = {
   id: string;
   doc_id: string;
   schema_id: string | null;
-  body: unknown;
+  body: Record<string, string | number>;
   created_at: string;
   updated_at: string;
 };
 
 const defaultSchemaModel = process.env.AI_STUDIO_MODEL || null;
+
+type StoredDocument = {
+  id: string;
+  filename: string;
+  storage_url: string | null;
+  blob_url: string | null;
+  parse_json: ParseResult | null;
+  bytes_b64: string | null;
+};
+
+function collectPlaceholderTokens(source: string | null | undefined): string[] {
+  if (!source || typeof source !== "string") {
+    return [];
+  }
+
+  const trimmed = source.trim();
+  if (!trimmed) {
+    return [];
+  }
+
+  const tokens = new Set<string>();
+
+  if (/_{3,}/.test(trimmed)) {
+    tokens.add(trimmed);
+  }
+
+  if (/^\[[^\]]+\]$/.test(trimmed)) {
+    tokens.add(trimmed);
+    const inner = trimmed.slice(1, -1).trim();
+    if (/_{3,}/.test(inner)) {
+      tokens.add(inner);
+    }
+  } else if (trimmed.includes("_")) {
+    const display = trimmed.replace(/_/g, " ").trim();
+    if (display) {
+      tokens.add(`[${display}]`);
+    }
+  } else if (trimmed.includes(" ")) {
+    tokens.add(`[${trimmed}]`);
+  }
+
+  return Array.from(tokens);
+}
 
 type SchemaPayload = {
   model_name?: string | null;
@@ -451,17 +505,47 @@ function normalizePlaceholderList(parseJson: ParseResult | null | undefined) {
   );
 }
 
-async function fetchDocument(docId: string) {
+async function fetchDocument(docId: string): Promise<StoredDocument | null> {
   const result = await dbQuery<{
     id: string;
+    filename: string;
+    storage_url: string | null;
+    blob_url: string | null;
     parse_json: ParseResult | null;
   }>(
-    `SELECT id, parse_json
+    `SELECT id,
+            filename,
+            storage_url,
+            blob_url,
+            parse_json
        FROM documents
-       WHERE id = $1`,
+      WHERE id = $1`,
     [docId]
   );
-  return result.rows[0] ?? null;
+  const row = result.rows[0];
+  if (!row) {
+    return null;
+  }
+
+  let bytesB64: string | null = null;
+  const storagePath = row.storage_url || row.blob_url;
+  if (storagePath) {
+    try {
+      const buffer = await fsp.readFile(storagePath);
+      bytesB64 = buffer.toString("base64");
+    } catch (error) {
+      console.error("Failed to read stored document bytes:", error);
+    }
+  }
+
+  return {
+    id: row.id,
+    filename: row.filename,
+    storage_url: row.storage_url,
+    blob_url: row.blob_url,
+    parse_json: row.parse_json,
+    bytes_b64: bytesB64
+  };
 }
 
 function formatSchemaPayload(row: SchemaRow) {
@@ -670,6 +754,147 @@ app.post("/api/doc/:id/answer", async (req, res) => {
   } catch (error) {
     console.error("Answer persistence failed:", error);
     res.status(500).json({ error: "Failed to persist answers" });
+  }
+});
+
+app.post("/api/doc/:id/render", async (req, res) => {
+  try {
+    const docId = req.params.id;
+
+    const doc = await fetchDocument(docId);
+    if (!doc) return res.status(404).json({ error: "doc_not_found" });
+
+    const schemaResult = await dbQuery<SchemaRow>(
+      `SELECT * FROM schemas WHERE doc_id = $1 ORDER BY created_at DESC LIMIT 1`,
+      [docId]
+    );
+    const schema = schemaResult.rows[0];
+
+    const answersResult = await dbQuery<AnswerRow>(
+      `SELECT * FROM answers WHERE doc_id = $1 ORDER BY updated_at DESC LIMIT 1`,
+      [docId]
+    );
+    const answers = answersResult.rows[0];
+
+    if (!schema || !answers) {
+      return res.status(409).json({
+        error: "incomplete",
+        needs: [!schema ? "schema" : null, !answers ? "answers" : null].filter(Boolean)
+      });
+    }
+
+    const placeholderLabels = new Map<string, string>();
+    const placeholderMeta = new Map<string, { label: string; tokens: string[] }>();
+    const placeholderList = doc.parse_json?.placeholders;
+    if (Array.isArray(placeholderList)) {
+      for (const entry of placeholderList) {
+        if (
+          entry &&
+          typeof entry.key === "string" &&
+          typeof entry.label === "string"
+        ) {
+          placeholderLabels.set(entry.key, entry.label);
+          const rawTokens = Array.isArray((entry as any).tokens)
+            ? (entry as any).tokens.filter((token: unknown): token is string =>
+                typeof token === "string" && token.trim().length > 0
+              )
+            : [];
+          placeholderMeta.set(entry.key, {
+            label: entry.label,
+            tokens: rawTokens
+          });
+        }
+      }
+    }
+
+    const mapping: Record<string, string> = {};
+    const schemaGroups = Array.isArray(schema.body?.groups) ? schema.body.groups : [];
+    for (const group of schemaGroups) {
+      const fields = Array.isArray(group?.fields) ? group.fields : [];
+      for (const field of fields) {
+        if (!field?.key) {
+          continue;
+        }
+        const val = (answers.body as Record<string, unknown> | null)?.[field.key];
+        if (val == null) {
+          continue;
+        }
+
+        const targetTokens = new Set<string>();
+        const explicitTargets = Array.isArray(field.targets) ? field.targets : [];
+        for (const target of explicitTargets) {
+          if (typeof target === "string" && target.trim()) {
+            for (const token of collectPlaceholderTokens(target)) {
+              targetTokens.add(token);
+            }
+          }
+        }
+
+        if (!targetTokens.size) {
+          const meta = placeholderMeta.get(field.key);
+          if (meta) {
+            for (const token of meta.tokens) {
+              for (const expanded of collectPlaceholderTokens(token)) {
+                targetTokens.add(expanded);
+              }
+            }
+            if (!targetTokens.size && meta.label) {
+              for (const token of collectPlaceholderTokens(`[${meta.label}]`)) {
+                targetTokens.add(token);
+              }
+            }
+          }
+        }
+
+        if (!targetTokens.size) {
+          const placeholderLabel = placeholderLabels.get(field.key) ?? field.label;
+          if (placeholderLabel) {
+            for (const token of collectPlaceholderTokens(`[${placeholderLabel}]`)) {
+              targetTokens.add(token);
+            }
+          }
+        }
+
+        for (const token of targetTokens) {
+          if (!token || token in mapping) {
+            continue;
+          }
+          mapping[token] = String(val);
+        }
+      }
+    }
+
+    if (!doc.bytes_b64) {
+      console.error("Missing stored bytes for document", docId);
+      return res.status(500).json({ error: "doc_bytes_missing" });
+    }
+
+    const payload = {
+      doc_bytes_b64: doc.bytes_b64,
+      mapping,
+      filename: doc.filename
+    };
+
+    const response = await fetch(`${docServiceBase}/render`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      return res.status(502).json({ error: "render_failed", detail: errorText.slice(0, 400) });
+    }
+
+    const { filled_bytes_b64, filled_filename } = await response.json();
+    const buffer = Buffer.from(filled_bytes_b64, "base64");
+
+    res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.wordprocessingml.document");
+    res.setHeader("Content-Disposition", `attachment; filename="${filled_filename}"`);
+    res.status(200).send(buffer);
+  } catch (error) {
+    console.error("Error in /api/doc/:id/render:", error);
+    res.status(500).json({ error: "server_error" });
   }
 });
 

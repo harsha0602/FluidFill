@@ -49,7 +49,7 @@ const upload = multer({
     limits: { fileSize: 10 * 1024 * 1024 } // 10 MB
 });
 const frontendOrigin = (process.env.FRONTEND_ORIGIN || "").replace(/\/$/, "");
-const allowedOrigins = new Set(frontendOrigin ? [frontendOrigin] : []);
+const allowedOrigins = new Set([frontendOrigin, "http://localhost:3000"].filter((origin) => origin));
 app.use(cors({
     origin(origin, callback) {
         if (!origin) {
@@ -91,6 +91,37 @@ async function callDocServiceMultipart(endpoint, buffer, filename) {
         throw new DocServiceError(resp.status, detail || "doc-service request failed");
     }
     return resp.json();
+}
+const defaultSchemaModel = process.env.AI_STUDIO_MODEL || null;
+function collectPlaceholderTokens(source) {
+    if (!source || typeof source !== "string") {
+        return [];
+    }
+    const trimmed = source.trim();
+    if (!trimmed) {
+        return [];
+    }
+    const tokens = new Set();
+    if (/_{3,}/.test(trimmed)) {
+        tokens.add(trimmed);
+    }
+    if (/^\[[^\]]+\]$/.test(trimmed)) {
+        tokens.add(trimmed);
+        const inner = trimmed.slice(1, -1).trim();
+        if (/_{3,}/.test(inner)) {
+            tokens.add(inner);
+        }
+    }
+    else if (trimmed.includes("_")) {
+        const display = trimmed.replace(/_/g, " ").trim();
+        if (display) {
+            tokens.add(`[${display}]`);
+        }
+    }
+    else if (trimmed.includes(" ")) {
+        tokens.add(`[${trimmed}]`);
+    }
+    return Array.from(tokens);
 }
 app.post("/api/upload", upload.single("file"), async (req, res) => {
     const file = req.file;
@@ -204,6 +235,43 @@ app.get("/api/doc/:id", async (req, res) => {
         res.status(500).json({ error: "Failed to load document" });
     }
 });
+app.delete("/api/doc/:id", async (req, res) => {
+    const { id } = req.params;
+    const client = await pool.connect();
+    try {
+        await client.query("BEGIN");
+        const docResult = await client.query(`SELECT storage_url
+         FROM documents
+         WHERE id = $1
+         FOR UPDATE`, [id]);
+        const doc = docResult.rows[0];
+        if (!doc) {
+            await client.query("ROLLBACK");
+            return res.json({ ok: true, deleted: false });
+        }
+        await client.query(`DELETE FROM documents WHERE id = $1`, [id]);
+        await client.query("COMMIT");
+        if (doc.storage_url) {
+            try {
+                await fsp.unlink(doc.storage_url);
+            }
+            catch (error) {
+                if (error?.code !== "ENOENT") {
+                    console.error("Failed to remove stored document:", error);
+                }
+            }
+        }
+        res.json({ ok: true });
+    }
+    catch (error) {
+        await client.query("ROLLBACK").catch(() => { });
+        console.error("Failed to delete document:", error);
+        res.status(500).json({ error: "Failed to delete document" });
+    }
+    finally {
+        client.release();
+    }
+});
 app.get("/api/doc/:id/preview", async (req, res) => {
     const { id } = req.params;
     try {
@@ -250,19 +318,99 @@ app.get("/api/doc/:id/preview", async (req, res) => {
         res.status(500).json({ error: "Failed to fetch preview" });
     }
 });
+function normalizePlaceholderList(parseJson) {
+    if (!parseJson || !Array.isArray(parseJson.placeholders)) {
+        return [];
+    }
+    return parseJson.placeholders.filter((item) => !!item && typeof item.key === "string" && typeof item.label === "string");
+}
+async function fetchDocument(docId) {
+    const result = await dbQuery(`SELECT id,
+            filename,
+            storage_url,
+            blob_url,
+            parse_json
+       FROM documents
+      WHERE id = $1`, [docId]);
+    const row = result.rows[0];
+    if (!row) {
+        return null;
+    }
+    let bytesB64 = null;
+    const storagePath = row.storage_url || row.blob_url;
+    if (storagePath) {
+        try {
+            const buffer = await fsp.readFile(storagePath);
+            bytesB64 = buffer.toString("base64");
+        }
+        catch (error) {
+            console.error("Failed to read stored document bytes:", error);
+        }
+    }
+    return {
+        id: row.id,
+        filename: row.filename,
+        storage_url: row.storage_url,
+        blob_url: row.blob_url,
+        parse_json: row.parse_json,
+        bytes_b64: bytesB64
+    };
+}
+function formatSchemaPayload(row) {
+    const rawBody = row.body;
+    const schemaBody = rawBody && typeof rawBody === "object" && !Array.isArray(rawBody)
+        ? rawBody
+        : {};
+    return {
+        ...schemaBody,
+        _meta: {
+            id: row.id,
+            doc_id: row.doc_id,
+            model_name: row.model_name,
+            created_at: row.created_at
+        }
+    };
+}
 app.get("/api/doc/:id/schema", async (req, res) => {
     const { id } = req.params;
     try {
-        const result = await dbQuery(`SELECT parse_json
-       FROM documents
-       WHERE id = $1`, [id]);
-        const row = result.rows[0];
-        if (!row) {
+        const doc = await fetchDocument(id);
+        if (!doc) {
+            return res.status(404).json({ error: "Document not found", not_found: true });
+        }
+        const schemaResult = await dbQuery(`SELECT id, doc_id, model_name, body, created_at
+         FROM schemas
+        WHERE doc_id = $1
+        ORDER BY created_at DESC
+        LIMIT 1`, [id]);
+        const schemaRow = schemaResult.rows[0];
+        if (!schemaRow) {
+            return res.status(404).json({ not_found: true });
+        }
+        return res.json(formatSchemaPayload(schemaRow));
+    }
+    catch (error) {
+        console.error("Schema lookup failed:", error);
+        res.status(500).json({ error: "Failed to fetch schema" });
+    }
+});
+app.post("/api/doc/:id/schema", async (req, res) => {
+    const { id } = req.params;
+    try {
+        const doc = await fetchDocument(id);
+        if (!doc) {
             return res.status(404).json({ error: "Document not found" });
         }
-        const placeholders = Array.isArray(row.parse_json?.placeholders)
-            ? row.parse_json.placeholders
-            : [];
+        const existing = await dbQuery(`SELECT id, doc_id, model_name, body, created_at
+         FROM schemas
+        WHERE doc_id = $1
+        ORDER BY created_at DESC
+        LIMIT 1`, [id]);
+        if (existing.rows[0]) {
+            return res.json(formatSchemaPayload(existing.rows[0]));
+        }
+        const placeholders = normalizePlaceholderList(doc.parse_json);
+        let schemaJson;
         try {
             const schemaResp = await fetch(`${docServiceBase}/schema`, {
                 method: "POST",
@@ -273,8 +421,7 @@ app.get("/api/doc/:id/schema", async (req, res) => {
                 const detail = await schemaResp.text();
                 throw new DocServiceError(schemaResp.status, detail || "doc-service schema failed");
             }
-            const schemaJson = await schemaResp.json();
-            return res.json(schemaJson);
+            schemaJson = (await schemaResp.json());
         }
         catch (error) {
             const message = error instanceof DocServiceError
@@ -283,29 +430,203 @@ app.get("/api/doc/:id/schema", async (req, res) => {
             console.error("Schema generation failed:", error);
             return res.status(502).json({ error: message });
         }
+        const inferredModel = schemaJson && typeof schemaJson === "object" && schemaJson !== null
+            ? schemaJson.model_name ?? defaultSchemaModel
+            : defaultSchemaModel;
+        const insertResult = await dbQuery(`INSERT INTO schemas (doc_id, model_name, body)
+       VALUES ($1, $2, $3)
+       RETURNING id, doc_id, model_name, body, created_at`, [id, inferredModel, schemaJson]);
+        return res.status(201).json(formatSchemaPayload(insertResult.rows[0]));
     }
     catch (error) {
-        console.error("Schema fetch failed:", error);
-        res.status(500).json({ error: "Failed to fetch schema" });
+        console.error("Schema generation failed:", error);
+        res.status(500).json({ error: "Failed to generate schema" });
+    }
+});
+app.get("/api/doc/:id/answer", async (req, res) => {
+    const { id } = req.params;
+    try {
+        const doc = await fetchDocument(id);
+        if (!doc) {
+            return res.status(404).json({ error: "Document not found" });
+        }
+        const result = await dbQuery(`SELECT id, doc_id, schema_id, body, created_at, updated_at
+         FROM answers
+        WHERE doc_id = $1
+        ORDER BY updated_at DESC
+        LIMIT 1`, [id]);
+        const row = result.rows[0];
+        if (!row) {
+            return res.json({ body: {} });
+        }
+        return res.json({
+            id: row.id,
+            doc_id: row.doc_id,
+            schema_id: row.schema_id,
+            body: row.body ?? {},
+            created_at: row.created_at,
+            updated_at: row.updated_at
+        });
+    }
+    catch (error) {
+        console.error("Answer lookup failed:", error);
+        res.status(500).json({ error: "Failed to fetch answers" });
     }
 });
 app.post("/api/doc/:id/answer", async (req, res) => {
     const { id } = req.params;
-    const { key, value } = req.body ?? {};
-    if (!key) {
-        return res.status(400).json({ error: "key required" });
+    const payload = req.body;
+    if (!payload || typeof payload !== "object" || payload.body == null) {
+        return res.status(400).json({ error: "body map required" });
     }
+    if (typeof payload.body !== "object" || Array.isArray(payload.body)) {
+        return res.status(400).json({ error: "body must be an object map" });
+    }
+    const schemaId = typeof payload.schema_id === "string" ? payload.schema_id : null;
     try {
-        const result = await dbQuery(`SELECT 1 FROM documents WHERE id = $1`, [id]);
-        if (result.rowCount === 0) {
+        const doc = await fetchDocument(id);
+        if (!doc) {
             return res.status(404).json({ error: "Document not found" });
         }
+        const existing = await dbQuery(`SELECT id
+         FROM answers
+        WHERE doc_id = $1
+        ORDER BY updated_at DESC
+        LIMIT 1`, [id]);
+        if (existing.rows[0]) {
+            const updateResult = await dbQuery(`UPDATE answers
+            SET body = $1::jsonb,
+                schema_id = COALESCE($2::uuid, schema_id),
+                updated_at = now()
+          WHERE id = $3
+          RETURNING id, doc_id, schema_id, body, created_at, updated_at`, [payload.body, schemaId, existing.rows[0].id]);
+            return res.json(updateResult.rows[0]);
+        }
+        const insertResult = await dbQuery(`INSERT INTO answers (doc_id, schema_id, body)
+       VALUES ($1, $2, $3)
+       RETURNING id, doc_id, schema_id, body, created_at, updated_at`, [id, schemaId, payload.body]);
+        return res.status(201).json(insertResult.rows[0]);
     }
     catch (error) {
-        console.error("Answer validation failed:", error);
-        return res.status(500).json({ error: "Failed to persist answer" });
+        console.error("Answer persistence failed:", error);
+        res.status(500).json({ error: "Failed to persist answers" });
     }
-    res.json({ ok: true, key, value });
+});
+app.post("/api/doc/:id/render", async (req, res) => {
+    try {
+        const docId = req.params.id;
+        const doc = await fetchDocument(docId);
+        if (!doc)
+            return res.status(404).json({ error: "doc_not_found" });
+        const schemaResult = await dbQuery(`SELECT * FROM schemas WHERE doc_id = $1 ORDER BY created_at DESC LIMIT 1`, [docId]);
+        const schema = schemaResult.rows[0];
+        const answersResult = await dbQuery(`SELECT * FROM answers WHERE doc_id = $1 ORDER BY updated_at DESC LIMIT 1`, [docId]);
+        const answers = answersResult.rows[0];
+        if (!schema || !answers) {
+            return res.status(409).json({
+                error: "incomplete",
+                needs: [!schema ? "schema" : null, !answers ? "answers" : null].filter(Boolean)
+            });
+        }
+        const placeholderLabels = new Map();
+        const placeholderMeta = new Map();
+        const placeholderList = doc.parse_json?.placeholders;
+        if (Array.isArray(placeholderList)) {
+            for (const entry of placeholderList) {
+                if (entry &&
+                    typeof entry.key === "string" &&
+                    typeof entry.label === "string") {
+                    placeholderLabels.set(entry.key, entry.label);
+                    const rawTokens = Array.isArray(entry.tokens)
+                        ? entry.tokens.filter((token) => typeof token === "string" && token.trim().length > 0)
+                        : [];
+                    placeholderMeta.set(entry.key, {
+                        label: entry.label,
+                        tokens: rawTokens
+                    });
+                }
+            }
+        }
+        const mapping = {};
+        const schemaGroups = Array.isArray(schema.body?.groups) ? schema.body.groups : [];
+        for (const group of schemaGroups) {
+            const fields = Array.isArray(group?.fields) ? group.fields : [];
+            for (const field of fields) {
+                if (!field?.key) {
+                    continue;
+                }
+                const val = answers.body?.[field.key];
+                if (val == null) {
+                    continue;
+                }
+                const targetTokens = new Set();
+                const explicitTargets = Array.isArray(field.targets) ? field.targets : [];
+                for (const target of explicitTargets) {
+                    if (typeof target === "string" && target.trim()) {
+                        for (const token of collectPlaceholderTokens(target)) {
+                            targetTokens.add(token);
+                        }
+                    }
+                }
+                if (!targetTokens.size) {
+                    const meta = placeholderMeta.get(field.key);
+                    if (meta) {
+                        for (const token of meta.tokens) {
+                            for (const expanded of collectPlaceholderTokens(token)) {
+                                targetTokens.add(expanded);
+                            }
+                        }
+                        if (!targetTokens.size && meta.label) {
+                            for (const token of collectPlaceholderTokens(`[${meta.label}]`)) {
+                                targetTokens.add(token);
+                            }
+                        }
+                    }
+                }
+                if (!targetTokens.size) {
+                    const placeholderLabel = placeholderLabels.get(field.key) ?? field.label;
+                    if (placeholderLabel) {
+                        for (const token of collectPlaceholderTokens(`[${placeholderLabel}]`)) {
+                            targetTokens.add(token);
+                        }
+                    }
+                }
+                for (const token of targetTokens) {
+                    if (!token || token in mapping) {
+                        continue;
+                    }
+                    mapping[token] = String(val);
+                }
+            }
+        }
+        if (!doc.bytes_b64) {
+            console.error("Missing stored bytes for document", docId);
+            return res.status(500).json({ error: "doc_bytes_missing" });
+        }
+        const payload = {
+            doc_bytes_b64: doc.bytes_b64,
+            mapping,
+            filename: doc.filename
+        };
+        const response = await fetch(`${docServiceBase}/render`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload)
+        });
+        if (!response.ok) {
+            const errorText = await response.text();
+            return res.status(502).json({ error: "render_failed", detail: errorText.slice(0, 400) });
+        }
+        const { filled_bytes_b64, filled_filename } = await response.json();
+        const buffer = Buffer.from(filled_bytes_b64, "base64");
+        res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.wordprocessingml.document");
+        res.setHeader("Content-Disposition", `attachment; filename="${filled_filename}"`);
+        res.status(200).send(buffer);
+    }
+    catch (error) {
+        console.error("Error in /api/doc/:id/render:", error);
+        res.status(500).json({ error: "server_error" });
+    }
 });
 async function startServer() {
     await applyMigrations();
