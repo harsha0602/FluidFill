@@ -827,6 +827,14 @@ app.post("/api/doc/:id/render", async (req, res) => {
             for (const token of collectPlaceholderTokens(target)) {
               targetTokens.add(token);
             }
+            const metaForTarget = placeholderMeta.get(target.trim());
+            if (metaForTarget) {
+              for (const token of metaForTarget.tokens) {
+                for (const expanded of collectPlaceholderTokens(token)) {
+                  targetTokens.add(expanded);
+                }
+              }
+            }
           }
         }
 
