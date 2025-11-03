@@ -57,7 +57,7 @@ class SchemaEndpointTests(unittest.TestCase):
         os.environ["AI_STUDIO_API_KEY"] = "test-key"
         app = _reload_app()
         client = TestClient(app)
-        with mock.patch("app.main.generate_schema_json", return_value="not json"):
+        with mock.patch("app.main.call_gemini_json", return_value="not json"):
             response = client.post(
                 "/schema",
                 json={"placeholders": [{"name": "company_name", "occurrences": 1}]},
@@ -86,7 +86,7 @@ class SchemaEndpointTests(unittest.TestCase):
             ]
         }
         fenced_response = f"```json\n{json.dumps(schema_payload)}\n```"
-        with mock.patch("app.main.generate_schema_json", return_value=fenced_response):
+        with mock.patch("app.main.call_gemini_json", return_value=fenced_response):
             response = client.post(
                 "/schema",
                 json={"placeholders": [{"name": "company_name", "occurrences": 2}]},
@@ -108,7 +108,7 @@ class SchemaEndpointTests(unittest.TestCase):
         os.environ["ENABLE_DEV_ROUTES"] = "true"
         app = _reload_app()
         client = TestClient(app)
-        with mock.patch("app.main.generate_schema_json", return_value='{"ok": true}'):
+        with mock.patch("app.main.call_gemini_json", return_value='{"ok": true}'):
             response = client.get("/dev/ai-studio-ping")
         self.assertEqual(response.status_code, 200)
         self.assertIn("raw", response.json())

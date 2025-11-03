@@ -6,7 +6,7 @@ import os
 import re
 from collections import OrderedDict
 from io import BytesIO, UnsupportedOperation
-from typing import Any, Dict, Iterable, List, Literal, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 from zipfile import BadZipFile
 
 from dotenv import load_dotenv
@@ -17,9 +17,10 @@ from docx.oxml.text.paragraph import CT_P
 from docx.table import Table
 from docx.text.paragraph import Paragraph
 from fastapi import FastAPI, File, HTTPException, UploadFile
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
-from app.ai_studio import generate_schema_json
+from app.ai_studio import call_gemini_json
+from app.models import SchemaResponse
 
 load_dotenv()
 
@@ -37,7 +38,7 @@ for _deprecated in _DEPRECATED_ENV_VARS:
     if _deprecated in os.environ:
         os.environ.pop(_deprecated, None)
 
-AI_STUDIO_MODEL = os.getenv("AI_STUDIO_MODEL", "gemini-2.5-flash")
+AI_STUDIO_MODEL = os.getenv("AI_STUDIO_MODEL", "gemini-1.5-flash")
 
 logger.info("AI Studio model: %s", AI_STUDIO_MODEL)
 
@@ -62,29 +63,10 @@ class ParseResult(BaseModel):
 
 
 class Placeholder(BaseModel):
-    name: str
-    occurrences: int
-    example_context: Optional[str] = None
-
-
-class FieldSchema(BaseModel):
     key: str
     label: str
-    type: Literal["text", "email", "phone", "date", "number", "multiline", "select"] = "text"
-    required: bool = True
-    repeat_group: Optional[str] = None
-    help: Optional[str] = None
-
-
-class SchemaGroup(BaseModel):
-    id: str
-    title: str
-    description: Optional[str] = None
-    fields: List[FieldSchema] = Field(default_factory=list)
-
-
-class SchemaResponse(BaseModel):
-    groups: List[SchemaGroup] = Field(default_factory=list)
+    occurrences: int
+    example_context: Optional[str] = None
 
 
 PLACEHOLDER_PATTERN = re.compile(r"\[([^\]]+)\]|(_{3,})")
@@ -306,61 +288,30 @@ def render_docx_to_html(file: UploadFile) -> str:
     return full_html
 
 
-def _strip_md(value: str) -> str:
-    value = value.strip()
-    if value.startswith("```"):
-        parts = value.split("```", 2)
-        if len(parts) >= 2:
-            content = parts[1]
-            if content.startswith("json"):
-                content = content.split("\n", 1)
-                content = content[1] if len(content) > 1 else ""
-            return content.strip()
-    return value
-
-
-def generate_schema_from_placeholders_ai_studio(placeholders: List[Placeholder]) -> SchemaResponse:
+def build_schema_prompt(placeholders: List[Placeholder]) -> str:
     placeholder_payload = json.dumps(
-        [placeholder.model_dump() for placeholder in placeholders], indent=2
+        [placeholder.model_dump(exclude_none=True) for placeholder in placeholders],
+        indent=2,
     )
-    prompt = (
-        "You are generating a structured form schema to fill a legal document (SAFE).\n"
-        "Inputs: placeholder tokens with names, occurrence counts, and optional context.\n"
-        "Requirements:\n"
-        "- Output ONLY valid JSON for the following Pydantic schema:\n"
-        '  SchemaResponse = { "groups": [ { "id": str, "title": str, "description"?: str, '
-        '"fields": [ { "key": str, "label": str, "type": '
-        '"text"|"email"|"phone"|"date"|"number"|"multiline"|"select", "required": bool, '
-        '"repeat_group"?: str, "help"?: str } ] } ] }\n'
-        "- Group logically (Company, Investor, Economics/Terms).\n"
-        "- If multiple placeholders refer to the same semantic field, emit ONE field and set repeat_group to a stable id "
-        '(e.g., "company_name") so the app can fan it out to all occurrences.\n'
-        "- Use types: email for emails, date for dates, number for numerics, otherwise text. Long free-form -> multiline.\n"
-        '- Labels should be human friendly (e.g., "Company Name").\n'
-        "- Keep it minimal but complete.\n"
+    return (
+        "You are generating a structured form schema to help users fill a legal SAFE agreement.\n"
+        "Return JSON only that conforms to this schema:\n"
+        'SchemaResponse = {"groups": [{"id": str, "title": str, "description"?: str, "fields": ['
+        '{"key": str, "label": str, "type": "text"|"email"|"phone"|"date"|"number"|"multiline"|"select", '
+        '"required": bool, "help"?: str, "repeat_group"?: str, "targets": [str]}]}]}\n'
+        "Guidelines:\n"
+        "- Group fields logically by topic (e.g., Company, Investor, Economics).\n"
+        "- Set field.targets to every placeholder key this field should populate; use the key values exactly as provided.\n"
+        "- When one answer fills multiple placeholders, set repeat_group to a stable snake_case id (e.g., \"company_name\").\n"
+        "- Use occurrences and context to decide when placeholders share the same field.\n"
+        "- Choose accurate field.type values: email for emails, date for dates, phone for phone numbers, number for numeric values, multiline for long free-form responses, select when a discrete choice is implied.\n"
+        "- Provide concise help text only when it adds clarity.\n"
+        "- Keep the JSON compact (aim for <400 tokens) and return nothing else.\n"
+        "- Do not include markdown fences, comments, or explanations outside the JSON.\n"
         "\n"
         "Placeholders:\n"
         f"{placeholder_payload}\n"
     )
-
-    logger.info("Requesting schema from Google AI Studio for %d placeholders", len(placeholders))
-    raw_json = generate_schema_json(prompt, model=AI_STUDIO_MODEL)
-    if not raw_json.strip():
-        logger.error("AI Studio returned empty schema response")
-        raise RuntimeError("AI Studio returned empty schema")
-
-    raw_json = _strip_md(raw_json)
-
-    try:
-        schema_payload = json.loads(raw_json)
-    except Exception as exc:
-        snippet = raw_json[:500]
-        logger.error("AI Studio returned non-JSON content (first 500 chars): %s", snippet)
-        raise RuntimeError(f"AI Studio returned non-JSON content: {exc}") from exc
-
-    schema = SchemaResponse.model_validate(schema_payload)
-    logger.info("Received schema with %d groups from Google AI Studio", len(schema.groups))
-    return schema
 
 
 @app.get("/health")
@@ -415,10 +366,21 @@ async def schema_endpoint(payload: Dict[str, Any]):
 
     items = payload.get("placeholders", []) if isinstance(payload, dict) else []
     placeholders: List[Placeholder] = []
-    for item in items:
+    for index, item in enumerate(items, start=1):
         if not isinstance(item, dict):
             continue
-        name = item.get("name") or item.get("key") or "UNKNOWN"
+        raw_label = item.get("label") or item.get("name") or ""
+        label = str(raw_label).strip()
+        raw_key = item.get("key")
+        key = str(raw_key).strip() if isinstance(raw_key, str) else ""
+        if not key and label:
+            key = _to_snake_case(label)
+        if not label and key:
+            label = key.replace("_", " ").title()
+        if not key:
+            key = f"field_{index}"
+        if not label:
+            label = key.replace("_", " ").title()
         occurrences_value = item.get("occurrences", 1)
         try:
             occurrences = max(int(occurrences_value), 1)
@@ -426,18 +388,31 @@ async def schema_endpoint(payload: Dict[str, Any]):
             occurrences = 1
         placeholders.append(
             Placeholder(
-                name=name,
+                key=key,
+                label=label,
                 occurrences=occurrences,
                 example_context=item.get("example_context"),
             )
         )
 
+    prompt = build_schema_prompt(placeholders)
+    logger.info("Requesting schema from Google AI Studio for %d placeholders", len(placeholders))
+
     try:
-        schema = await asyncio.to_thread(generate_schema_from_placeholders_ai_studio, placeholders)
-        return schema.model_dump()
+        raw = await asyncio.to_thread(call_gemini_json, prompt, AI_STUDIO_MODEL)
     except Exception:
         logger.exception("AI Studio schema generation failed")
         raise HTTPException(status_code=502, detail="schema_generation_failed")
+
+    try:
+        schema_payload = json.loads(raw)
+        schema = SchemaResponse.model_validate(schema_payload)
+    except Exception as exc:  # pragma: no cover - defensive logging
+        logger.error("Invalid schema JSON: %s ...raw=%s", exc, raw[:600])
+        raise HTTPException(status_code=502, detail="schema_generation_failed") from exc
+
+    logger.info("Received schema with %d groups from Google AI Studio", len(schema.groups))
+    return schema.model_dump()
 
 
 @app.get("/dev/ai-studio-ping")
@@ -445,5 +420,5 @@ def ai_studio_ping():
     if os.getenv("ENABLE_DEV_ROUTES", "false").lower() != "true":
         raise HTTPException(status_code=404, detail="Not found")
     prompt = 'Return JSON: {"ok": true}'
-    raw = generate_schema_json(prompt, model=AI_STUDIO_MODEL)
+    raw = call_gemini_json(prompt, AI_STUDIO_MODEL)
     return {"raw": raw[:2000]}

@@ -2,6 +2,7 @@ README.md
 pyproject.toml
 app/ai_studio.py
 app/main.py
+app/models.py
 fluidfill_doc_service.egg-info/PKG-INFO
 fluidfill_doc_service.egg-info/SOURCES.txt
 fluidfill_doc_service.egg-info/dependency_links.txt

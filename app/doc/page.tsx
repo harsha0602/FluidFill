@@ -1,15 +1,42 @@
 "use client";
 
-import { Suspense, useEffect, useMemo, useRef, useState } from "react";
+import {
+  Suspense,
+  type ChangeEvent,
+  type FormEvent,
+  useEffect,
+  useMemo,
+  useRef,
+  useState
+} from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 
+type SchemaField = {
+  key: string;
+  label: string;
+  type?: string;
+  required?: boolean;
+  help?: string | null;
+  repeat_group?: string | null;
+  targets?: string[];
+};
+
 type SchemaGroup = {
-  name?: string;
-  fields?: Array<{ key: string; label: string }>;
+  id?: string;
+  title?: string;
+  description?: string | null;
+  fields?: SchemaField[];
 };
 
 type SchemaResponse = {
   groups?: SchemaGroup[];
+  model_name?: string | null;
+  _meta?: {
+    id: string;
+    doc_id: string;
+    model_name: string | null;
+    created_at: string;
+  };
 };
 
 type DocumentMeta = {
@@ -39,13 +66,24 @@ function DocumentContent() {
 
   const [meta, setMeta] = useState<DocumentMeta | null>(null);
   const [previewHtml, setPreviewHtml] = useState<string | null>(null);
-  const [schemaGroups, setSchemaGroups] = useState<SchemaGroup[]>([]);
+  const [schema, setSchema] = useState<SchemaResponse | null>(null);
+  const [answers, setAnswers] = useState<Record<string, string>>({});
+  const [formStatus, setFormStatus] = useState<
+    "idle" | "loading" | "saving" | "saved" | "error"
+  >("loading");
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const [touchedFields, setTouchedFields] = useState<Record<string, boolean>>({});
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+
+  const schemaGroups = useMemo(() => schema?.groups ?? [], [schema]);
 
   const [canLoadDoc, setCanLoadDoc] = useState(false);
   const lastProcessedIdRef = useRef<string | null>(null);
   const shouldDiscardRef = useRef(false);
+  const isHydratingAnswersRef = useRef(false);
+  const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const saveRequestIdRef = useRef(0);
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -159,7 +197,11 @@ function DocumentContent() {
     if (!id) {
       setMeta(null);
       setPreviewHtml(null);
-      setSchemaGroups([]);
+      setSchema(null);
+      setAnswers({});
+      setTouchedFields({});
+      setSaveError(null);
+      setFormStatus("idle");
       setLoading(false);
       setError("No document ID provided.");
       return;
@@ -170,6 +212,13 @@ function DocumentContent() {
     async function loadDocument() {
       setLoading(true);
       setError(null);
+      setFormStatus("loading");
+      setSaveError(null);
+      if (saveTimerRef.current) {
+        clearTimeout(saveTimerRef.current);
+        saveTimerRef.current = null;
+      }
+      saveRequestIdRef.current += 1;
 
       try {
         const metaResp = await fetch(buildUrl(`/api/doc/${id}`));
@@ -204,26 +253,98 @@ function DocumentContent() {
           setPreviewHtml(previewJson?.html ?? "");
         }
 
+        let schemaData: SchemaResponse | null = null;
+
         if (schemaResp.ok) {
-          const schemaJson = (await schemaResp.json()) as SchemaResponse;
-          if (!cancelled) {
-            setSchemaGroups(schemaJson?.groups ?? []);
+          schemaData = (await schemaResp.json()) as SchemaResponse;
+        } else if (schemaResp.status === 404) {
+          try {
+            const createResp = await fetch(buildUrl(`/api/doc/${id}/schema`), {
+              method: "POST",
+              headers: { "Content-Type": "application/json" }
+            });
+            if (createResp.ok) {
+              schemaData = (await createResp.json()) as SchemaResponse;
+            } else {
+              const createMessage = await createResp.text();
+              console.warn("Schema creation failed", createMessage);
+            }
+          } catch (schemaError) {
+            console.error("Schema creation error", schemaError);
           }
         } else {
           const schemaMessage = await schemaResp.text();
           console.warn("Schema request failed", schemaMessage);
-          if (!cancelled) {
-            setSchemaGroups([]);
+        }
+
+        if (!cancelled) {
+          setSchema(schemaData);
+        }
+
+        let initialAnswers: Record<string, string> = {};
+        const fieldTypeMap = new Map<string, string>();
+        schemaData?.groups?.forEach((group) => {
+          group.fields?.forEach((field) => {
+            if (field?.key && field.type) {
+              fieldTypeMap.set(field.key, field.type);
+            }
+          });
+        });
+
+        if (schemaData && !cancelled) {
+          try {
+            const answerResp = await fetch(buildUrl(`/api/doc/${id}/answer`));
+            if (answerResp.ok) {
+              const answerJson = (await answerResp.json()) as {
+                body?: Record<string, unknown>;
+              };
+              const body = answerJson?.body;
+              if (body && typeof body === "object" && !Array.isArray(body)) {
+                initialAnswers = Object.entries(body).reduce<Record<string, string>>(
+                  (acc, [key, value]) => {
+                    const rawValue =
+                      value === null || value === undefined ? "" : String(value);
+                    const fieldType = fieldTypeMap.get(key);
+                    if (fieldType === "date" && rawValue) {
+                      acc[key] = rawValue.split("T")[0] ?? "";
+                    } else {
+                      acc[key] = rawValue;
+                    }
+                    return acc;
+                  },
+                  {}
+                );
+              }
+            } else if (answerResp.status !== 404) {
+              const answerMessage = await answerResp.text();
+              console.warn("Answer request failed", answerMessage);
+            }
+          } catch (answerError) {
+            console.error("Answer fetch error", answerError);
           }
+        }
+
+        if (!cancelled) {
+          isHydratingAnswersRef.current = true;
+          setAnswers(initialAnswers);
+          setTouchedFields({});
+          setSaveError(null);
+          const hasGroups = !!schemaData && (schemaData.groups?.length ?? 0) > 0;
+          const hasAnswers = Object.keys(initialAnswers).length > 0;
+          setFormStatus(hasGroups ? (hasAnswers ? "saved" : "idle") : "saved");
         }
       } catch (err) {
         if (cancelled) return;
         const message =
-          err instanceof Error ? err.message : "Unexpected error loading document.";
-        setError(message);
-        setMeta(null);
-        setPreviewHtml(null);
-        setSchemaGroups([]);
+      err instanceof Error ? err.message : "Unexpected error loading document.";
+    setError(message);
+    setMeta(null);
+    setPreviewHtml(null);
+    setSchema(null);
+    setAnswers({});
+    setTouchedFields({});
+    setSaveError(message);
+    setFormStatus("error");
       } finally {
         if (!cancelled) {
           setLoading(false);
@@ -237,6 +358,94 @@ function DocumentContent() {
       cancelled = true;
     };
   }, [id, canLoadDoc, router]);
+
+  useEffect(() => {
+    return () => {
+      if (saveTimerRef.current) {
+        clearTimeout(saveTimerRef.current);
+        saveTimerRef.current = null;
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!id) {
+      return;
+    }
+    if (schemaGroups.length === 0) {
+      return;
+    }
+    if (isHydratingAnswersRef.current) {
+      isHydratingAnswersRef.current = false;
+      return;
+    }
+
+    if (saveTimerRef.current) {
+      clearTimeout(saveTimerRef.current);
+    }
+
+    saveTimerRef.current = setTimeout(async () => {
+      const requestId = ++saveRequestIdRef.current;
+      setFormStatus("saving");
+      try {
+        const resp = await fetch(buildUrl(`/api/doc/${id}/answer`), {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ body: answers })
+        });
+
+        if (!resp.ok) {
+          const detail = await resp.text();
+          throw new Error(detail || "Failed to save answers");
+        }
+
+        if (saveRequestIdRef.current === requestId) {
+          setFormStatus("saved");
+          setSaveError(null);
+        }
+      } catch (saveErr) {
+        console.error("Answer save failed:", saveErr);
+        const message =
+          saveErr instanceof Error ? saveErr.message : "Failed to save answers.";
+        if (saveRequestIdRef.current === requestId) {
+          setFormStatus("error");
+          setSaveError(message);
+        }
+      }
+    }, 1200);
+
+    return () => {
+      if (saveTimerRef.current) {
+        clearTimeout(saveTimerRef.current);
+        saveTimerRef.current = null;
+      }
+    };
+  }, [answers, id, schemaGroups]);
+
+  const handleFieldChange = (key: string, value: string) => {
+    let didChange = false;
+    setAnswers((prev) => {
+      if (prev[key] === value) {
+        return prev;
+      }
+      didChange = true;
+      return { ...prev, [key]: value };
+    });
+    if (didChange) {
+      saveRequestIdRef.current += 1;
+      setFormStatus((prev) => (prev === "loading" ? "loading" : "idle"));
+      setSaveError(null);
+    }
+  };
+
+  const handleFieldBlur = (key: string) => {
+    setTouchedFields((prev) => {
+      if (prev[key]) {
+        return prev;
+      }
+      return { ...prev, [key]: true };
+    });
+  };
 
   const uploadedTimestamp = useMemo(() => {
     if (!meta?.createdAt) return null;
@@ -307,12 +516,238 @@ function DocumentContent() {
         </div>
 
         <aside className="flex min-h-[60vh] flex-col gap-4 rounded-xl border border-primary/40 bg-background/40 p-4 shadow">
-          <h2 className="text-xl font-semibold text-text">AI Form coming next</h2>
-          <p className="text-sm text-text/70">
-            We&apos;ve cached {schemaGroups.length} schema group
-            {schemaGroups.length === 1 ? "" : "s"} from your template. You&apos;ll be able
-            to complete it right here shortly.
-          </p>
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <h2 className="text-xl font-semibold text-text">Fill the form</h2>
+              <p className="text-xs text-text/60">
+                Values auto-save shortly after you stop typing.
+              </p>
+            </div>
+            <span
+              className={`rounded-full px-3 py-1 text-xs font-medium ${
+                formStatus === "saved"
+                  ? "bg-emerald-400/10 text-emerald-300"
+                  : formStatus === "saving"
+                  ? "bg-primary/20 text-primary"
+                  : formStatus === "error"
+                  ? "bg-red-400/10 text-red-300"
+                  : "bg-primary/10 text-text/70"
+              }`}
+            >
+              {formStatus === "idle"
+                ? "Unsaved changes"
+                : formStatus === "loading"
+                ? "Loading…"
+                : formStatus === "saving"
+                ? "Saving…"
+                : formStatus === "saved"
+                ? "Saved"
+                : "Save failed"}
+            </span>
+          </div>
+
+          {saveError && (
+            <div className="rounded-md border border-red-400/60 bg-red-400/10 px-3 py-2 text-sm text-red-200">
+              {saveError}
+            </div>
+          )}
+
+          {!schema ? (
+            <div className="rounded-md border border-primary/20 bg-background/60 px-3 py-4 text-sm text-text/70">
+              Loading schema…
+            </div>
+          ) : schemaGroups.length === 0 ? (
+            <div className="rounded-md border border-primary/20 bg-background/60 px-3 py-4 text-sm text-text/70">
+              We couldn&apos;t detect any fillable fields. You can still preview the
+              template or upload a different document.
+            </div>
+          ) : (
+            <form
+              className="flex-1 space-y-6 overflow-y-auto"
+              onSubmit={(event: FormEvent<HTMLFormElement>) => event.preventDefault()}
+            >
+              {schemaGroups.map((group, groupIndex) => (
+                <fieldset
+                  key={group.id ?? `${group.title ?? "group"}-${groupIndex}`}
+                  className="space-y-4 rounded-lg border border-primary/30 bg-background/60 p-4"
+                  disabled={formStatus === "loading"}
+                >
+                  <legend className="px-1 text-sm font-semibold uppercase tracking-wide text-primary">
+                    {group.title || "Untitled Section"}
+                  </legend>
+                  {group.description && (
+                    <p className="text-xs text-text/60">{group.description}</p>
+                  )}
+                  <div className="space-y-4">
+                    {group.fields?.map((field) => {
+                      if (!field?.key || !field.label) {
+                        return null;
+                      }
+                      let value = answers[field.key] ?? "";
+                      if (field.type === "date" && value) {
+                        value = value.split("T")[0] ?? "";
+                      }
+                      const isRequired = field.required !== false;
+                      const showError =
+                        isRequired &&
+                        touchedFields[field.key] &&
+                        value.trim().length === 0;
+                      const baseInputClasses =
+                        "w-full rounded-md border border-primary/40 bg-background/80 px-3 py-2 text-sm text-text placeholder:text-text/40 focus:outline-none focus:ring-2 focus:ring-primary/60 focus:border-primary/60";
+                      const inputClasses = `${baseInputClasses}${
+                        showError ? " border-red-400 focus:ring-red-400 focus:border-red-400" : ""
+                      }`;
+                      const handleChange = (
+                        event: ChangeEvent<HTMLInputElement | HTMLTextAreaElement>
+                      ) => {
+                        handleFieldChange(field.key, event.target.value);
+                      };
+                      const handleBlur = () => handleFieldBlur(field.key);
+
+                      let inputNode: JSX.Element;
+                      switch (field.type) {
+                        case "email":
+                          inputNode = (
+                            <input
+                              type="email"
+                              id={field.key}
+                              name={field.key}
+                              value={value}
+                              placeholder={field.label}
+                              onChange={handleChange}
+                              onBlur={handleBlur}
+                              className={inputClasses}
+                              autoComplete="email"
+                              required={isRequired}
+                              aria-invalid={showError}
+                            />
+                          );
+                          break;
+                        case "date":
+                          inputNode = (
+                            <input
+                              type="date"
+                              id={field.key}
+                              name={field.key}
+                              value={value}
+                              onChange={handleChange}
+                              onBlur={handleBlur}
+                              className={inputClasses}
+                              required={isRequired}
+                              aria-invalid={showError}
+                            />
+                          );
+                          break;
+                        case "number":
+                          inputNode = (
+                            <input
+                              type="number"
+                              step="any"
+                              id={field.key}
+                              name={field.key}
+                              value={value}
+                              onChange={handleChange}
+                              onBlur={handleBlur}
+                              className={inputClasses}
+                              inputMode="decimal"
+                              required={isRequired}
+                              aria-invalid={showError}
+                            />
+                          );
+                          break;
+                        case "multiline":
+                          inputNode = (
+                            <textarea
+                              id={field.key}
+                              name={field.key}
+                              value={value}
+                              placeholder={field.label}
+                              onChange={handleChange}
+                              onBlur={handleBlur}
+                              className={`${inputClasses} min-h-[96px] resize-y`}
+                              required={isRequired}
+                              aria-invalid={showError}
+                            />
+                          );
+                          break;
+                        case "select":
+                          inputNode = (
+                            <input
+                              type="text"
+                              id={field.key}
+                              name={field.key}
+                              value={value}
+                              placeholder="Select options coming soon"
+                              onChange={handleChange}
+                              onBlur={handleBlur}
+                              className={inputClasses}
+                              required={isRequired}
+                              aria-invalid={showError}
+                            />
+                          );
+                          break;
+                        case "phone":
+                          inputNode = (
+                            <input
+                              type="tel"
+                              id={field.key}
+                              name={field.key}
+                              value={value}
+                              placeholder={field.label}
+                              onChange={handleChange}
+                              onBlur={handleBlur}
+                              className={inputClasses}
+                              autoComplete="tel"
+                              required={isRequired}
+                              aria-invalid={showError}
+                            />
+                          );
+                          break;
+                        default:
+                          inputNode = (
+                            <input
+                              type="text"
+                              id={field.key}
+                              name={field.key}
+                              value={value}
+                              placeholder={field.label}
+                              onChange={handleChange}
+                              onBlur={handleBlur}
+                              className={inputClasses}
+                              autoComplete="off"
+                              required={isRequired}
+                              aria-invalid={showError}
+                            />
+                          );
+                          break;
+                      }
+
+                      return (
+                        <div key={field.key} className="space-y-1">
+                          <label
+                            htmlFor={field.key}
+                            className="flex items-center gap-1 text-sm font-medium text-text"
+                          >
+                            {field.label}
+                            {isRequired && <span className="text-primary">*</span>}
+                          </label>
+                          {inputNode}
+                          {field.help && (
+                            <p className="text-xs text-text/60">{field.help}</p>
+                          )}
+                          {showError && (
+                            <p className="text-xs text-red-300">
+                              This field is required.
+                            </p>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </fieldset>
+              ))}
+            </form>
+          )}
         </aside>
       </div>
     </section>

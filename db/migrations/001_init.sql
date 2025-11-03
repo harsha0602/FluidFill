@@ -27,16 +27,6 @@ CREATE TABLE IF NOT EXISTS occurrences (
 );
 
 
-CREATE TABLE IF NOT EXISTS answers (
-  id UUID PRIMARY KEY,
-  document_id UUID NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
-  placeholder_id UUID NOT NULL REFERENCES placeholders(id) ON DELETE CASCADE,
-  value TEXT,
-  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  UNIQUE(document_id, placeholder_id)
-);
-
-
 CREATE TABLE IF NOT EXISTS versions (
   id UUID PRIMARY KEY,
   document_id UUID NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
@@ -48,4 +38,3 @@ CREATE TABLE IF NOT EXISTS versions (
 -- Indexes
 CREATE INDEX IF NOT EXISTS idx_placeholders_doc ON placeholders(document_id);
 CREATE INDEX IF NOT EXISTS idx_occurrences_ph ON occurrences(placeholder_id);
-CREATE INDEX IF NOT EXISTS idx_answers_doc ON answers(document_id);
