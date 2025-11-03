@@ -19,23 +19,25 @@ jobs:
       - name: Trigger Render blueprint deploy
         env:
           RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+          RENDER_BLUEPRINT_ID: ${{ secrets.RENDER_BLUEPRINT_ID }}
         run: |
           if [ -z "${RENDER_API_KEY:-}" ]; then
             echo "RENDER_API_KEY secret is not configured." >&2
             exit 1
           fi
 
-          REPO_URL="https://github.com/${GITHUB_REPOSITORY}"
-          REF_NAME="${GITHUB_REF_NAME:-main}"
-          REQUEST_BODY=$(printf '{"repo":"%s","ref":"%s"}' "$REPO_URL" "$REF_NAME")
+          if [ -z "${RENDER_BLUEPRINT_ID:-}" ]; then
+            echo "RENDER_BLUEPRINT_ID secret is not configured." >&2
+            exit 1
+          fi
 
           RESPONSE_FILE="$(mktemp)"
           HTTP_STATUS=$(curl -sS -o "$RESPONSE_FILE" -w "%{http_code}" \
-            -X POST "https://api.render.com/v1/blueprints" \
+            -X POST "https://api.render.com/v1/blueprints/${RENDER_BLUEPRINT_ID}/deploys" \
             -H "Authorization: Bearer ${RENDER_API_KEY}" \
             -H "Content-Type: application/json" \
             -H "Accept: application/json" \
-            -d "$REQUEST_BODY")
+            -d '{"clearCache":false}')
 
           echo "Render API response (status ${HTTP_STATUS}):"
           cat "$RESPONSE_FILE"

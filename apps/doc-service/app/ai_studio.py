@@ -7,7 +7,7 @@ import requests
 log = logging.getLogger(__name__)
 
 API_URL_TPL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
-MODEL_DEFAULT = os.getenv("AI_STUDIO_MODEL", "gemini-1.5-flash")
+MODEL_DEFAULT = os.getenv("AI_STUDIO_MODEL", "gemini-2.5-flash")
 
 
 def _strip_fence(text: str) -> str:

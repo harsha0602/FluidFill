@@ -1,60 +1,141 @@
 # FluidFill
 
-FluidFill is a Next.js 14 starter styled with a Lexsy-inspired palette. It ships with Tailwind CSS, a global Inter font, and placeholder layout primitives so you can immediately start iterating on product flows.
+## Overview
+FluidFill streamlines the way teams prepare repeatable legal and fundraising paperwork. Upload a `.docx`, the FastAPI document service detects placeholders, and the Express API gateway stores schemas plus partially filled answers in PostgreSQL. A React/Next.js UI lets operators review suggestions, reconcile values, and download a freshly rendered document that stays stylistically faithful to the source template.
 
-## Getting Started
-
-1. Install dependencies:
-   ```bash
-   pnpm install
-   ```
-2. Start the development server:
-   ```bash
-   pnpm dev
-   ```
-3. Open <http://localhost:3000> to view the landing page.
-
-## Static Export
-
-- Build locally with `npm run build:static` (or `pnpm run build:static`) to generate the static `out/` folder.
-
-## GitHub Pages Deployment
-
-- Enable GitHub Pages under **Settings → Pages** and select **GitHub Actions** as the source.
-- Pushes to `main` trigger the `Deploy to GitHub Pages` workflow, which exports the site and deploys it to `https://<USER>.github.io/<REPO_NAME>/`.
-- Base path and assets automatically adjust in CI via `GITHUB_REPOSITORY`; local `npm run dev` continues to serve from `/`.
-- For a custom domain, add `public/CNAME` and configure the domain within Pages settings after the first successful deploy.
-
-## Deploying on Render
-
-1. Create a Render Blueprint deploy using `render.yaml`. It provisions the `fluidfill-db` Postgres instance plus the `fluidfill-api` (Node) and `fluidfill-docs` (FastAPI) services. The first manual deploy seeds both services.
-2. Set the `FRONTEND_ORIGIN` environment variable on the `fluidfill-api` service to your public web origin (for example `https://<user>.github.io/<repo>` or a custom domain). Render injects `DATABASE_URL` automatically; `DOC_SERVICE_URL` is linked to the FastAPI service.
-3. Store the `OPENAI_API_KEY` on the `fluidfill-docs` service if you wire up schema generation, otherwise leave it empty.
-4. In GitHub, add a repository secret `RENDER_API_KEY` containing a Render API token with Blueprint deploy permissions. The `.github/workflows/deploy-api.yaml` workflow triggers a blueprint deploy on every push to `main`.
-5. Define a repository variable `NEXT_PUBLIC_API_BASE` that points to the public API URL (for example `https://fluidfill-api.onrender.com`). The GitHub Pages workflow injects this at build time.
-6. For local work, copy `.env.example` to `.env` and set `FRONTEND_ORIGIN=http://localhost:3000` so the API gateway accepts requests from the Next.js dev server.
-
-### Render Build Notes
-
-When building `fluidfill-api` on Render, set `NPM_CONFIG_PRODUCTION=false` so the install step includes devDependencies such as `@types/*`. Skipping them causes the TypeScript compiler to miss Node module type definitions and fail the build.
+## Demo
+[Demo video – coming soon](https://example.com/your-demo-url)
 
 ## Tech Stack
+| Layer | Tech | Versions / Constraints | Notes |
+| --- | --- | --- | --- |
+| Web UI | Next.js 14.2, React 18.3, TypeScript, Tailwind CSS | Node `>=18.17 <21`, pnpm `9.x` | Customer-facing interface for upload, review, and filling workflows. |
+| API gateway (`apps/api-gw`) | Express 4, Multer, pg, tsx, TypeScript 5.4 | Same Node constraint as above | Orchestrates uploads, persists schemas/answers, migrates PostgreSQL. |
+| Doc service (`apps/doc-service`) | Python 3.11, FastAPI 0.111, Uvicorn 0.30, python-docx, Google AI Studio SDK | Python `3.11.x` | Parses placeholders, renders filled `.docx`, proxies AI-powered schema extraction. |
+| Database | PostgreSQL 15+ | Docker or local install | Stores documents, schemas, and answer sets. |
+| Tooling & Ops | Docker 24+, Render Blueprint (`render.yaml`), dotenv |  | Container images and Infrastructure-as-code deployment pipeline. |
 
-- Next.js 14 (App Router, TypeScript)
-- React 18
-- Tailwind CSS 3
-- ESLint (Next.js core web vitals)
+## Local Development Setup
 
-## Project Structure
+### Prerequisites
+- Node.js `18.17 – 20.x`
+- pnpm `9.12` (see `packageManager` in `package.json`)
+- Python `3.11.x` with `venv`
+- Docker Desktop 24+ (for running PostgreSQL locally) or a native PostgreSQL 15+ installation
+- Make sure `psql` is on your PATH for applying migrations
 
-- `app/` – App Router routes, global layout, styles.
-- `components/` – Shared UI primitives including the TopBar and Footer placeholders.
-- `tailwind.config.ts` – Tailwind configuration with FluidFill theme tokens.
+### Base Environment
+```bash
+cp .env.example .env
+```
+Populate `.env` with the endpoints you expect during development:
+```bash
+NEXT_PUBLIC_API_BASE=http://localhost:4000
+FRONTEND_ORIGIN=http://localhost:3000
+DATABASE_URL=postgres://fluidfill:fluidfill@localhost:5432/fluidfill
+DOC_SERVICE_URL=http://localhost:5001
+AI_STUDIO_MODEL=gemini-2.5-flash
+AI_STUDIO_API_KEY=<your-gemini-key>   # optional; required for /schema
+```
 
-## Theming
+### Database (PostgreSQL)
+1. Start a dev database (Docker example):
+   ```bash
+   docker run --name fluidfill-db \
+     -e POSTGRES_DB=fluidfill \
+     -e POSTGRES_USER=fluidfill \
+     -e POSTGRES_PASSWORD=fluidfill \
+     -p 5432:5432 \
+     -d postgres:15
+   ```
+2. Apply migrations from the API gateway:
+   ```bash
+   cd apps/api-gw
+   pnpm install
+   DATABASE_URL=postgres://fluidfill:fluidfill@localhost:5432/fluidfill pnpm migrate
+   ```
 
-- Background: `#1a1b1f`
-- Primary: `#9d76dd`
-- Text: `#f4f4f5`
+### Doc Service (`apps/doc-service`)
+1. Create a virtualenv and install dependencies:
+   ```bash
+   cd apps/doc-service
+   python3.11 -m venv .venv
+   source .venv/bin/activate
+   pip install --upgrade pip
+   pip install -e .
+   ```
+2. Run the FastAPI server:
+   ```bash
+   export AI_STUDIO_API_KEY=your-gemini-key   # optional unless calling /schema
+   uvicorn app.main:app --reload --host 0.0.0.0 --port 5001
+   ```
+   The health check is available at `http://localhost:5001/health`.
 
-Global typography uses the Inter typeface via `next/font`. Update the Tailwind theme tokens in `tailwind.config.ts` to extend the palette further as needed.
+### API Gateway (`apps/api-gw`)
+1. Install dependencies and start the watcher:
+   ```bash
+   cd apps/api-gw
+   pnpm install
+   pnpm dev
+   ```
+2. Required environment variables (read from the repo root `.env`):
+   - `DATABASE_URL` – Postgres connection string
+   - `DOC_SERVICE_URL` – defaults to `http://localhost:5001`
+   - `FRONTEND_ORIGIN` – allow-listed UI origin (`http://localhost:3000` for dev)
+   - `PORT` – defaults to `4000`
+3. Verify the gateway with `curl http://localhost:4000/api/health`.
+
+### Web UI (`app/`, `components/`, `lib/`)
+1. From the repository root:
+   ```bash
+   pnpm install
+   pnpm dev
+   ```
+2. Open `http://localhost:3000` and confirm uploads proxy through `NEXT_PUBLIC_API_BASE`.
+
+## Ports (Local Defaults)
+| Service | Port | Source |
+| --- | --- | --- |
+| Next.js web UI | 3000 | `pnpm dev` in repo root |
+| API gateway | 4000 | `PORT` env / defaults in `apps/api-gw/src/index.ts` |
+| Doc service | 5001 | `uvicorn` started with `--port 5001` |
+| PostgreSQL | 5432 | Docker example above |
+
+## Repository Structure
+```text
+FluidFill/
+├─ app/                  # Next.js App Router pages, layouts, API routes
+├─ apps/
+│  ├─ api-gw/            # Express gateway for uploads, schema storage, migrations
+│  └─ doc-service/       # FastAPI document parsing & rendering microservice
+├─ components/           # Reusable client-side UI primitives
+├─ db/
+│  └─ migrations/        # Ordered PostgreSQL schema migrations
+├─ lib/                  # Frontend utilities and API clients
+├─ public/               # Static assets served by Next.js
+├─ uploads/              # Scratch space for uploaded docs during development
+├─ render.yaml           # Render Blueprint (API + doc service + Postgres)
+└─ ...
+```
+
+## If I Had a Bit More Time
+
+**Tech hardening**
+- Replace AI Studio with OpenAI API for better output quality and tooling; keep a provider interface so either can be swapped.
+- Move from Render free tier to GCP/AWS/Railway to cut cold starts and latency; wire proper observability (structured logs, traces, error rates).
+- Add robust retries and circuit breakers on AI calls; cache schemas server-side by doc hash to control LLM cost.
+
+**Functionality**
+- Integrate Supermemory.ai for intelligent cross-document memory: auto-suggest known company/investor details, recall prior governing-law defaults, and provide persistent user/org-level context across sessions.
+- AI-assisted placeholder extraction (not just regex). Use a lightweight model to propose spans + types.
+- Live preview filling — update left pane as you type (currently supported by API, just wire a debounce).
+- Pre-download verification step with inline edits (single pass before generating the `.docx`).
+- Multi-format support: PDF (via docx→pdf or direct), TXT, and templated HTML.
+- batch doc upload and edits
+- Context block: 500-word doc summary + filling guide; generated once and cached per document.
+- Field validation rules from AI (email/date/number constraints) and cross-field checks.
+
+**UX polish**
+- Two-pane smart editor with sticky group nav, search, and required-field counters.
+- Navigation between docs per user during batch mode
+- Toasts, optimistic save states, and resume-progress banners.

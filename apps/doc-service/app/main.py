@@ -39,7 +39,7 @@ for _deprecated in _DEPRECATED_ENV_VARS:
     if _deprecated in os.environ:
         os.environ.pop(_deprecated, None)
 
-AI_STUDIO_MODEL = os.getenv("AI_STUDIO_MODEL", "gemini-1.5-flash")
+AI_STUDIO_MODEL = os.getenv("AI_STUDIO_MODEL", "gemini-2.5-flash")
 
 logger.info("AI Studio model: %s", AI_STUDIO_MODEL)
 
