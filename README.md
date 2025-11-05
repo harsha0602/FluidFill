@@ -4,7 +4,7 @@
 FluidFill streamlines the way teams prepare repeatable legal and fundraising paperwork. Upload a `.docx`, the FastAPI document service detects placeholders, and the Express API gateway stores schemas plus partially filled answers in PostgreSQL. A React/Next.js UI lets operators review suggestions, reconcile values, and download a freshly rendered document that stays stylistically faithful to the source template.
 
 ## Demo
-[Demo video – coming soon](https://example.com/your-demo-url)
+[Technical Demo video](https://youtu.be/StmRbEnZBgs)
 
 ## Tech Stack
 | Layer | Tech | Versions / Constraints | Notes |
